@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>028Labs — Calculadora de Precificação</title>
+<style>
+  :root{
+    --bg: #f6f5f1;
+    --panel: #ffffff;
+    --ink: #1c1b19;
+    --ink-soft: #5a564e;
+    --line: #e4e1d8;
+    --accent: #e8590c;
+    --accent-dark: #b8430a;
+    --accent-soft: #fdeee3;
+    --locked-bg: #f1f0ec;
+    --locked-text: #6b6860;
+    --ok: #2f7d4f;
+    --danger: #b3261e;
+    --mono: 'JetBrains Mono', 'SFMono-Regular', Consolas, monospace;
+    --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; font-family:var(--sans); background:var(--bg); color:var(--ink);
+    -webkit-font-smoothing:antialiased;
+  }
+  .shell{display:flex; min-height:100vh;}
+  .side{
+    width:220px; flex-shrink:0; background:#1c1b19; color:#f6f5f1;
+    padding:28px 0; display:flex; flex-direction:column;
+  }
+  .brand{padding:0 20px 24px; border-bottom:1px solid #33312c; margin-bottom:12px;}
+  .brand .num{font-family:var(--mono); font-size:11px; color:var(--accent); letter-spacing:.08em;}
+  .brand .name{font-size:19px; font-weight:700; margin-top:2px;}
+  .brand .sub{font-size:12px; color:#93908a; margin-top:4px;}
+  nav{display:flex; flex-direction:column; gap:2px; padding:0 10px;}
+  nav button{
+    all:unset; cursor:pointer; padding:11px 14px; border-radius:6px; font-size:14px;
+    color:#c9c6bf; transition:background .12s, color .12s;
+  }
+  nav button:hover{background:#2a2925; color:#fff;}
+  nav button.active{background:var(--accent); color:#fff; font-weight:600;}
+  .side-foot{margin-top:auto; padding:16px 20px 0; font-size:11px; border-top:1px solid #33312c;}
+  .sync-dot{display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:6px;}
+  .sync-dot.ok{background:#3fb56e;}
+  .sync-dot.busy{background:#e8a83c; animation:pulse 1s infinite;}
+  .sync-dot.err{background:#e0574c;}
+  .sync-dot.off{background:#6b6860;}
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.3;}}
+  main{flex:1; padding:32px 40px; max-width:1180px;}
+  h1{font-size:24px; margin:0 0 4px;}
+  .lead{color:var(--ink-soft); font-size:14px; margin:0 0 28px;}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:22px 24px; margin-bottom:20px;}
+  .card h2{font-size:15px; margin:0 0 4px; font-weight:700;}
+  .card .card-note{font-size:12.5px; color:var(--ink-soft); margin:0 0 18px;}
+  .grid{display:grid; grid-template-columns:repeat(auto-fill, minmax(230px,1fr)); gap:14px;}
+  label{display:block; font-size:12px; color:var(--ink-soft); margin-bottom:5px; font-weight:600;}
+  input, select{
+    width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:6px;
+    font-family:var(--sans); font-size:13.5px; background:#fff; color:var(--ink);
+  }
+  input:focus, select:focus{outline:2px solid var(--accent); outline-offset:1px; border-color:var(--accent);}
+  .field{margin-bottom:0;}
+  .field.locked input{background:var(--locked-bg); color:var(--locked-text); border-color:var(--line);}
+  .field.locked label{display:flex; align-items:center; gap:5px;}
+  .lock-tag{font-size:9px; background:var(--locked-bg); color:var(--locked-text); padding:1px 5px; border-radius:3px; font-weight:700; letter-spacing:.03em;}
+  table{width:100%; border-collapse:collapse; font-size:13px;}
+  th{text-align:left; font-size:11px; color:var(--ink-soft); padding:8px 10px; border-bottom:1px solid var(--line); font-weight:700;}
+  td{padding:9px 10px; border-bottom:1px solid var(--line); vertical-align:middle;}
+  tr:last-child td{border-bottom:none;}
+  .mono{font-family:var(--mono);}
+  .num{text-align:right; font-family:var(--mono); font-variant-numeric:tabular-nums;}
+  .btn{all:unset; cursor:pointer; padding:9px 16px; border-radius:6px; font-size:13.5px; font-weight:600; background:var(--accent); color:#fff; transition:background .12s;}
+  .btn:hover{background:var(--accent-dark);}
+  .btn.ghost{background:transparent; color:var(--ink); border:1px solid var(--line);}
+  .btn.ghost:hover{background:#f0efea;}
+  .btn.small{padding:5px 10px; font-size:12px;}
+  .btn.danger{background:transparent; color:var(--danger); border:1px solid #e6b3ae;}
+  .btn.danger:hover{background:#fbeceb;}
+  .row-actions{display:flex; gap:6px;}
+  .toolbar{display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;}
+  .empty{padding:26px; text-align:center; color:var(--ink-soft); font-size:13.5px;}
+  .badge{display:inline-block; font-size:11px; padding:2px 8px; border-radius:20px; font-weight:700;}
+  .badge.orc{background:#eee7d8; color:#7a6a2c;}
+  .badge.apr{background:#e2ecfb; color:#2a5b9c;}
+  .badge.prod{background:#f4e3c7; color:#8a5a10;}
+  .badge.fin{background:#dcefe1; color:#256d3c;}
+  .badge.ent{background:#d8f0e3; color:#1c7a45;}
+  .badge.can{background:#f5dcda; color:#a33128;}
+  .result-strip{display:flex; flex-direction:column; border:1px solid var(--line); border-radius:10px; overflow:hidden;}
+  .result-cell{padding:16px 18px; border-bottom:1px solid var(--line);}
+  .result-cell:last-child{border-bottom:none;}
+  .result-cell .k{font-size:11px; color:var(--ink-soft); font-weight:700; margin-bottom:4px;}
+  .result-cell .v{font-family:var(--mono); font-size:19px; font-weight:700;}
+  .result-cell.hero{background:var(--accent); color:#fff;}
+  .result-cell.hero .k{color:#ffe2ce;}
+  .breakdown{display:grid; grid-template-columns:1fr; gap:0; margin-top:14px; font-size:13px;}
+  .breakdown .line{display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px dashed var(--line);}
+  .breakdown .line span:first-child{color:var(--ink-soft);}
+  .breakdown .line span:last-child{font-family:var(--mono);}
+  .two-col{display:grid; grid-template-columns:2fr 1fr; gap:20px; align-items:start;}
+  .tag-note{background:var(--accent-soft); border:1px solid #f6c9a8; color:#8a4318; font-size:12.5px; padding:10px 14px; border-radius:8px; margin-bottom:18px;}
+  .tag-note.info{background:#eef3fb; border-color:#c3d6f0; color:#2a4d7c;}
+  .tag-note.err{background:#fbecea; border-color:#eab7ae; color:#8a2f22;}
+  code{background:var(--locked-bg); padding:1px 6px; border-radius:4px; font-family:var(--mono); font-size:12px;}
+  ol.steps{padding-left:20px; font-size:13.5px; line-height:1.8;}
+  @media (max-width:880px){
+    .shell{flex-direction:column;}
+    .side{width:100%; flex-direction:row; overflow-x:auto; padding:14px;}
+    .brand{display:none;}
+    nav{flex-direction:row;}
+    main{padding:20px;}
+    .two-col{grid-template-columns:1fr;}
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+  <aside class="side">
+    <div class="brand">
+      <div class="num">028</div>
+      <div class="name">028Labs</div>
+      <div class="sub">Precificação 3D</div>
+    </div>
+    <nav id="nav"></nav>
+    <div class="side-foot" id="sync-status"></div>
+  </aside>
+  <main id="main"></main>
+</div>
+
+<script>
+const LS_SETTINGS_KEY = '028labs_github_settings';
+const LS_DATA_KEY = '028labs_local_cache';
+
+const DEFAULT_CONFIG = {
+  precoKWh: 0.75, potenciaPadraoW: 120, valorImpressoraPadrao: 2500, vidaUtilPadrao: 8000,
+  manutencaoMensalPadrao: 50, horasMesPadrao: 150, maoObraHora: 25, adminHora: 8,
+  percPerdas: 0.05, percImpostos: 0.06, percMargem: 0.30, percComissao: 0,
+  custoEmbalagem: 4, custoEtiqueta: 0.8, custoConsumiveis: 1.5,
+  descPromocional: 0.10, descAtacado: 0.15
+};
+
+let state = { config: { ...DEFAULT_CONFIG }, materiais: [], impressoras: [], pedidos: [] };
+let github = { owner:'', repo:'', path:'data.json', branch:'main', token:'' };
+let ghSha = null;
+let syncState = 'off'; // off | busy | ok | err
+let syncMsg = '';
+let tab = 'novo';
+let editingPedidoId = null;
+let draft = null;
+let saveTimer = null;
+
+// ---------- github settings (local only, never synced) ----------
+function loadSettings(){
+  try{ const raw = localStorage.getItem(LS_SETTINGS_KEY); if (raw) github = { ...github, ...JSON.parse(raw) }; } catch(e){}
+}
+function saveSettings(){ localStorage.setItem(LS_SETTINGS_KEY, JSON.stringify(github)); }
+function githubConfigured(){ return !!(github.owner && github.repo && github.token); }
+
+// ---------- base64 (unicode-safe) ----------
+function b64Encode(str){
+  const bytes = new TextEncoder().encode(str);
+  let bin = ''; bytes.forEach(b => bin += String.fromCharCode(b));
+  return btoa(bin);
+}
+function b64Decode(b64){
+  const bin = atob(b64.replace(/\n/g,''));
+  const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
+// ---------- github sync ----------
+async function ghFetch(){
+  if (!githubConfigured()) return;
+  setSync('busy','Buscando dados do GitHub…');
+  try{
+    const url = `https://api.github.com/repos/${github.owner}/${github.repo}/contents/${encodeURIComponent(github.path)}?ref=${github.branch}`;
+    const res = await fetch(url, { headers: { Authorization:`Bearer ${github.token}`, Accept:'application/vnd.github+json' } });
+    if (res.status === 404){ ghSha = null; setSync('ok','Repositório vazio — será criado no próximo salvamento.'); return; }
+    if (!res.ok) throw new Error(`GitHub respondeu ${res.status}`);
+    const json = await res.json();
+    ghSha = json.sha;
+    const content = b64Decode(json.content);
+    const remote = JSON.parse(content);
+    state = { config:{...DEFAULT_CONFIG, ...remote.config}, materiais:remote.materiais||[], impressoras:remote.impressoras||[], pedidos:remote.pedidos||[] };
+    localStorage.setItem(LS_DATA_KEY, JSON.stringify(state));
+    setSync('ok', 'Sincronizado com o GitHub.');
+  } catch(e){
+    setSync('err', 'Falha ao buscar do GitHub: ' + e.message);
+  }
+}
+async function ghPush(retry){
+  if (!githubConfigured()) { localStorage.setItem(LS_DATA_KEY, JSON.stringify(state)); return; }
+  setSync('busy','Salvando no GitHub…');
+  try{
+    const url = `https://api.github.com/repos/${github.owner}/${github.repo}/contents/${encodeURIComponent(github.path)}`;
+    const body = { message:`Atualiza dados — ${new Date().toLocaleString('pt-BR')}`, content: b64Encode(JSON.stringify(state,null,2)), branch: github.branch };
+    if (ghSha) body.sha = ghSha;
+    const res = await fetch(url, { method:'PUT', headers:{ Authorization:`Bearer ${github.token}`, Accept:'application/vnd.github+json', 'Content-Type':'application/json' }, body: JSON.stringify(body) });
+    if (res.status === 409 && !retry){ await ghFetch(); return ghPush(true); }
+    if (!res.ok) throw new Error(`GitHub respondeu ${res.status}`);
+    const json = await res.json();
+    ghSha = json.content.sha;
+    localStorage.setItem(LS_DATA_KEY, JSON.stringify(state));
+    setSync('ok', 'Salvo no GitHub às ' + new Date().toLocaleTimeString('pt-BR'));
+  } catch(e){
+    setSync('err', 'Falha ao salvar no GitHub: ' + e.message);
+  }
+}
+function setSync(s,msg){ syncState=s; syncMsg=msg; renderSyncStatus(); }
+function renderSyncStatus(){
+  const el = document.getElementById('sync-status');
+  if (!el) return;
+  if (!githubConfigured()){
+    el.innerHTML = `<span class="sync-dot off"></span>Dados salvos só neste navegador`;
+    return;
+  }
+  el.innerHTML = `<span class="sync-dot ${syncState}"></span>${syncMsg}`;
+}
+function queueSync(){
+  localStorage.setItem(LS_DATA_KEY, JSON.stringify(state));
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(()=>ghPush(false), 1200);
+}
+
+async function init(){
+  loadSettings();
+  try{ const raw = localStorage.getItem(LS_DATA_KEY); if (raw) state = JSON.parse(raw); } catch(e){}
+  render();
+  if (githubConfigured()) await ghFetch();
+  else if (!state.materiais.length && !state.impressoras.length) seedExample();
+  render();
+}
+function seedExample(){
+  state.materiais = [
+    { id: uid(), nome:'PLA Basic', marca:'Bambu Lab', tipo:'PLA', pesoRolo:1000, precoRolo:89.9 },
+    { id: uid(), nome:'PETG HF', marca:'Bambu Lab', tipo:'PETG', pesoRolo:1000, precoRolo:119.9 },
+  ];
+  state.impressoras = [
+    { id: uid(), nome:'Bambu Lab A1', modelo:'A1', valorAquisicao:2799, vidaUtil:8000, potencia:100, manutencaoMensal:45, horasMes:150 },
+  ];
+}
+function uid(){ return Math.random().toString(36).slice(2,10); }
+
+// ---------- calculations ----------
+function precoGrama(m){ return m.pesoRolo > 0 ? m.precoRolo / m.pesoRolo : 0; }
+function custoHoraImpressora(imp){
+  const dep = imp.vidaUtil > 0 ? imp.valorAquisicao / imp.vidaUtil : 0;
+  const man = imp.horasMes > 0 ? imp.manutencaoMensal / imp.horasMes : 0;
+  return { dep, man, total: dep + man };
+}
+function calcPedido(p){
+  const cfg = state.config;
+  const mat = state.materiais.find(m => m.id === p.materialId);
+  const imp = state.impressoras.find(i => i.id === p.impressoraId);
+  const pg = mat ? precoGrama(mat) : 0;
+  const custoMaterialSemPerda = (p.peso || 0) * pg;
+  const perdas = custoMaterialSemPerda * cfg.percPerdas;
+  const custoMaterialTotal = custoMaterialSemPerda + perdas;
+  const potencia = imp ? imp.potencia : cfg.potenciaPadraoW;
+  const consumoKwh = (potencia / 1000) * (p.tempoImpressao || 0);
+  const custoEnergia = consumoKwh * cfg.precoKWh;
+  const custoHoraMaq = imp ? custoHoraImpressora(imp).total
+    : (cfg.valorImpressoraPadrao / cfg.vidaUtilPadrao) + (cfg.manutencaoMensalPadrao / cfg.horasMesPadrao);
+  const custoMaquina = (p.tempoImpressao || 0) * custoHoraMaq;
+  const horasMO = (p.tempoPreparacao||0)+(p.tempoAcabamento||0)+(p.tempoMontagem||0)+(p.tempoEmbalagem||0)+(p.outrosTempos||0);
+  const custoMaoObra = horasMO * cfg.maoObraHora;
+  const custoEmbalagem = cfg.custoEmbalagem + cfg.custoEtiqueta + cfg.custoConsumiveis;
+  const despesasIndiretas = ((p.tempoImpressao||0) + horasMO) * cfg.adminHora;
+  const acabamentoExtra = p.acabamentoExtra || 0;
+  const custoTotal = custoMaterialTotal + custoEnergia + custoMaquina + custoMaoObra + acabamentoExtra + custoEmbalagem + despesasIndiretas;
+  const denomMin = 1 - cfg.percImpostos - cfg.percComissao;
+  const denomRec = denomMin - cfg.percMargem;
+  const precoMinimo = denomMin > 0 ? custoTotal / denomMin : 0;
+  const precoRecomendado = denomRec > 0 ? custoTotal / denomRec : 0;
+  const lucroR = precoRecomendado * cfg.percMargem;
+  const lucroPct = custoTotal > 0 ? lucroR / custoTotal : 0;
+  const precoPromo = precoRecomendado * (1 - cfg.descPromocional);
+  const precoAtacado = precoRecomendado * (1 - cfg.descAtacado);
+  const precoUnitario = p.quantidade > 0 ? precoRecomendado / p.quantidade : 0;
+  return { custoMaterialTotal, custoEnergia, custoMaquina, custoMaoObra, custoEmbalagem,
+    despesasIndiretas, acabamentoExtra, custoTotal, precoMinimo, precoRecomendado,
+    lucroR, lucroPct, precoPromo, precoAtacado, precoUnitario };
+}
+
+const fmtR = n => (isFinite(n)?n:0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
+const fmtP = n => ((isFinite(n)?n:0)*100).toLocaleString('pt-BR',{minimumFractionDigits:1,maximumFractionDigits:1})+'%';
+const STATUS = ['Orçamento','Aprovado','Em produção','Finalizado','Entregue','Cancelado'];
+const statusClass = { 'Orçamento':'orc','Aprovado':'apr','Em produção':'prod','Finalizado':'fin','Entregue':'ent','Cancelado':'can' };
+
+// ---------- render ----------
+function render(){
+  renderNav(); renderSyncStatus();
+  const m = document.getElementById('main');
+  if (tab==='config') m.innerHTML = viewConfig();
+  else if (tab==='materiais') m.innerHTML = viewMateriais();
+  else if (tab==='impressoras') m.innerHTML = viewImpressoras();
+  else if (tab==='novo') m.innerHTML = viewNovoPedido();
+  else if (tab==='lista') m.innerHTML = viewListaPedidos();
+  else if (tab==='github') m.innerHTML = viewGithub();
+  bindEvents();
+}
+function renderNav(){
+  const items = [['novo','Novo orçamento'],['lista','Orçamentos'],['materiais','Materiais'],
+    ['impressoras','Impressoras'],['config','Configurações'],['github','Sincronização']];
+  document.getElementById('nav').innerHTML = items.map(([id,label]) =>
+    `<button data-tab="${id}" class="${tab===id?'active':''}">${label}</button>`).join('');
+}
+function fieldNum(key, val, label, step='0.01'){
+  return `<div class="field"><label>${label}</label><input type="number" step="${step}" data-cfg="${key}" value="${val}"></div>`;
+}
+function viewConfig(){
+  const c = state.config;
+  return `<h1>Configurações</h1><p class="lead">Esses valores alimentam todos os cálculos automaticamente.</p>
+    <div class="card"><h2>Energia e máquina (padrão)</h2>
+      <p class="card-note">Usado quando um pedido não tem impressora selecionada.</p>
+      <div class="grid">
+        ${fieldNum('precoKWh', c.precoKWh, 'Energia elétrica (R$/kWh)')}
+        ${fieldNum('potenciaPadraoW', c.potenciaPadraoW, 'Potência padrão (W)', '1')}
+        ${fieldNum('valorImpressoraPadrao', c.valorImpressoraPadrao, 'Valor impressora padrão (R$)')}
+        ${fieldNum('vidaUtilPadrao', c.vidaUtilPadrao, 'Vida útil padrão (h)', '1')}
+        ${fieldNum('manutencaoMensalPadrao', c.manutencaoMensalPadrao, 'Manutenção mensal padrão (R$)')}
+        ${fieldNum('horasMesPadrao', c.horasMesPadrao, 'Horas trabalhadas/mês padrão', '1')}
+      </div></div>
+    <div class="card"><h2>Mão de obra e despesas</h2><div class="grid">
+        ${fieldNum('maoObraHora', c.maoObraHora, 'Mão de obra (R$/h)')}
+        ${fieldNum('adminHora', c.adminHora, 'Despesas indiretas (R$/h)')}
+        ${fieldNum('custoEmbalagem', c.custoEmbalagem, 'Embalagem (R$)')}
+        ${fieldNum('custoEtiqueta', c.custoEtiqueta, 'Etiqueta (R$)')}
+        ${fieldNum('custoConsumiveis', c.custoConsumiveis, 'Outros consumíveis (R$)')}
+      </div></div>
+    <div class="card"><h2>Perdas, impostos e margem</h2><div class="grid">
+        ${fieldNum('percPerdas', c.percPerdas, 'Perdas/desperdício (0–1)')}
+        ${fieldNum('percImpostos', c.percImpostos, 'Impostos (0–1)')}
+        ${fieldNum('percMargem', c.percMargem, 'Margem de lucro (0–1)')}
+        ${fieldNum('percComissao', c.percComissao, 'Comissão (0–1)')}
+        ${fieldNum('descPromocional', c.descPromocional, 'Desconto promocional (0–1)')}
+        ${fieldNum('descAtacado', c.descAtacado, 'Desconto atacado (0–1)')}
+      </div></div>`;
+}
+function viewMateriais(){
+  const rows = state.materiais.map(m => `<tr data-id="${m.id}">
+      <td><input data-mat="nome" value="${m.nome}" style="min-width:120px"></td>
+      <td><input data-mat="marca" value="${m.marca||''}" style="min-width:90px"></td>
+      <td><input data-mat="tipo" value="${m.tipo||''}" style="width:70px"></td>
+      <td><input data-mat="pesoRolo" type="number" step="1" value="${m.pesoRolo}" style="width:80px" class="num"></td>
+      <td><input data-mat="precoRolo" type="number" step="0.01" value="${m.precoRolo}" style="width:90px" class="num"></td>
+      <td class="num mono">${fmtR(precoGrama(m))}</td>
+      <td><button class="btn danger small" data-del-mat="${m.id}">Remover</button></td></tr>`).join('');
+  return `<h1>Materiais</h1><p class="lead">Cadastre seus filamentos. O custo por grama é calculado sozinho.</p>
+    <div class="card"><div class="toolbar"><h2 style="margin:0">Filamentos cadastrados</h2>
+        <button class="btn" id="add-mat">+ Adicionar material</button></div>
+      <table><thead><tr><th>Material</th><th>Marca</th><th>Tipo</th><th>Peso rolo (g)</th><th>Preço rolo (R$)</th><th>R$/g <span class="lock-tag">calc</span></th><th></th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="7"><div class="empty">Nenhum material cadastrado ainda.</div></td></tr>`}</tbody></table></div>`;
+}
+function viewImpressoras(){
+  const rows = state.impressoras.map(i => { const c = custoHoraImpressora(i); return `<tr data-id="${i.id}">
+      <td><input data-imp="nome" value="${i.nome}" style="min-width:130px"></td>
+      <td><input data-imp="modelo" value="${i.modelo||''}" style="width:80px"></td>
+      <td><input data-imp="valorAquisicao" type="number" step="0.01" value="${i.valorAquisicao}" style="width:90px" class="num"></td>
+      <td><input data-imp="vidaUtil" type="number" step="1" value="${i.vidaUtil}" style="width:80px" class="num"></td>
+      <td><input data-imp="potencia" type="number" step="1" value="${i.potencia}" style="width:70px" class="num"></td>
+      <td><input data-imp="manutencaoMensal" type="number" step="0.01" value="${i.manutencaoMensal}" style="width:80px" class="num"></td>
+      <td><input data-imp="horasMes" type="number" step="1" value="${i.horasMes}" style="width:70px" class="num"></td>
+      <td class="num mono">${fmtR(c.total)}</td>
+      <td><button class="btn danger small" data-del-imp="${i.id}">Remover</button></td></tr>`;}).join('');
+  return `<h1>Impressoras</h1><p class="lead">Cadastre suas máquinas. O custo por hora é calculado sozinho.</p>
+    <div class="card"><div class="toolbar"><h2 style="margin:0">Impressoras cadastradas</h2>
+        <button class="btn" id="add-imp">+ Adicionar impressora</button></div>
+      <table><thead><tr><th>Nome</th><th>Modelo</th><th>Valor (R$)</th><th>Vida útil (h)</th><th>Potência (W)</th><th>Manut./mês (R$)</th><th>h/mês</th><th>R$/h <span class="lock-tag">calc</span></th><th></th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="9"><div class="empty">Nenhuma impressora cadastrada ainda.</div></td></tr>`}</tbody></table></div>`;
+}
+function emptyPedido(){
+  return { id:null, numero: nextNumero(), data: new Date().toISOString().slice(0,10), cliente:'', produto:'',
+    quantidade:1, materialId: state.materiais[0]?.id||'', peso:0, impressoraId: state.impressoras[0]?.id||'',
+    tempoImpressao:0, tempoPreparacao:0, tempoAcabamento:0, tempoMontagem:0, tempoEmbalagem:0, outrosTempos:0,
+    acabamentoExtra:0, status:'Orçamento' };
+}
+function nextNumero(){ return (state.pedidos.reduce((mx,p)=>Math.max(mx,p.numero||0),0) || 0) + 1; }
+
+function viewNovoPedido(){
+  if (!draft) draft = editingPedidoId ? { ...state.pedidos.find(p=>p.id===editingPedidoId) } : emptyPedido();
+  const r = calcPedido(draft);
+  const matOpts = state.materiais.map(m=>`<option value="${m.id}" ${m.id===draft.materialId?'selected':''}>${m.nome}</option>`).join('');
+  const impOpts = state.impressoras.map(i=>`<option value="${i.id}" ${i.id===draft.impressoraId?'selected':''}>${i.nome}</option>`).join('');
+  const noRes = !state.materiais.length || !state.impressoras.length;
+  return `<h1>${editingPedidoId?'Editar':'Novo'} orçamento</h1><p class="lead">Preencha os dados da peça — o custo e o preço são calculados na hora.</p>
+    ${noRes ? `<div class="tag-note">Cadastre ao menos 1 material e 1 impressora antes de gerar um orçamento.</div>` : ''}
+    <div class="two-col"><div>
+        <div class="card"><h2>Dados do pedido</h2><div class="grid">
+            <div class="field locked"><label>Nº orçamento <span class="lock-tag">auto</span></label><input value="${draft.numero}" disabled></div>
+            <div class="field"><label>Data</label><input type="date" data-p="data" value="${draft.data}"></div>
+            <div class="field"><label>Cliente</label><input data-p="cliente" value="${draft.cliente}"></div>
+            <div class="field"><label>Produto/Peça</label><input data-p="produto" value="${draft.produto}"></div>
+            <div class="field"><label>Quantidade</label><input type="number" step="1" data-p="quantidade" value="${draft.quantidade}"></div>
+            <div class="field"><label>Status</label><select data-p="status">${STATUS.map(s=>`<option ${s===draft.status?'selected':''}>${s}</option>`).join('')}</select></div>
+          </div></div>
+        <div class="card"><h2>Material e impressora</h2><div class="grid">
+            <div class="field"><label>Material</label><select data-p="materialId">${matOpts}</select></div>
+            <div class="field"><label>Peso total estimado (g)</label><input type="number" step="1" data-p="peso" value="${draft.peso}"></div>
+            <div class="field"><label>Impressora</label><select data-p="impressoraId">${impOpts}</select></div>
+            <div class="field"><label>Tempo de impressão total (h)</label><input type="number" step="0.1" data-p="tempoImpressao" value="${draft.tempoImpressao}"></div>
+          </div></div>
+        <div class="card"><h2>Tempos de trabalho (total do pedido)</h2><div class="grid">
+            <div class="field"><label>Preparação (h)</label><input type="number" step="0.1" data-p="tempoPreparacao" value="${draft.tempoPreparacao}"></div>
+            <div class="field"><label>Acabamento (h)</label><input type="number" step="0.1" data-p="tempoAcabamento" value="${draft.tempoAcabamento}"></div>
+            <div class="field"><label>Montagem (h)</label><input type="number" step="0.1" data-p="tempoMontagem" value="${draft.tempoMontagem}"></div>
+            <div class="field"><label>Embalagem (h)</label><input type="number" step="0.1" data-p="tempoEmbalagem" value="${draft.tempoEmbalagem}"></div>
+            <div class="field"><label>Outros tempos (h)</label><input type="number" step="0.1" data-p="outrosTempos" value="${draft.outrosTempos}"></div>
+            <div class="field"><label>Acabamento — materiais extras (R$)</label><input type="number" step="0.01" data-p="acabamentoExtra" value="${draft.acabamentoExtra}"></div>
+          </div></div>
+        <div style="display:flex; gap:10px;">
+          <button class="btn" id="save-pedido">${editingPedidoId?'Salvar alterações':'Salvar orçamento'}</button>
+          <button class="btn ghost" id="cancel-pedido">Cancelar</button>
+        </div></div>
+      <div><div class="card" style="position:sticky; top:20px;"><h2>Resultado <span class="lock-tag">calculado</span></h2>
+          <div class="result-strip">
+            <div class="result-cell"><div class="k">CUSTO TOTAL DE PRODUÇÃO</div><div class="v">${fmtR(r.custoTotal)}</div></div>
+            <div class="result-cell hero"><div class="k">PREÇO RECOMENDADO</div><div class="v">${fmtR(r.precoRecomendado)}</div></div>
+          </div>
+          <div class="breakdown">
+            <div class="line"><span>Material (com perdas)</span><span>${fmtR(r.custoMaterialTotal)}</span></div>
+            <div class="line"><span>Energia</span><span>${fmtR(r.custoEnergia)}</span></div>
+            <div class="line"><span>Máquina</span><span>${fmtR(r.custoMaquina)}</span></div>
+            <div class="line"><span>Mão de obra</span><span>${fmtR(r.custoMaoObra)}</span></div>
+            <div class="line"><span>Acabamento extra</span><span>${fmtR(r.acabamentoExtra)}</span></div>
+            <div class="line"><span>Embalagem</span><span>${fmtR(r.custoEmbalagem)}</span></div>
+            <div class="line"><span>Despesas indiretas</span><span>${fmtR(r.despesasIndiretas)}</span></div>
+            <div class="line"><span>Preço mínimo</span><span>${fmtR(r.precoMinimo)}</span></div>
+            <div class="line"><span>Lucro</span><span>${fmtR(r.lucroR)} (${fmtP(r.lucroPct)})</span></div>
+            <div class="line"><span>Preço promocional</span><span>${fmtR(r.precoPromo)}</span></div>
+            <div class="line"><span>Preço atacado</span><span>${fmtR(r.precoAtacado)}</span></div>
+            <div class="line"><span>Preço unitário</span><span>${fmtR(r.precoUnitario)}</span></div>
+          </div></div></div></div>`;
+}
+function viewListaPedidos(){
+  const rows = [...state.pedidos].sort((a,b)=>b.numero-a.numero).map(p=>{ const r = calcPedido(p);
+    return `<tr><td class="mono">#${p.numero}</td><td>${p.data}</td><td>${p.cliente}</td><td>${p.produto}</td>
+      <td class="num">${p.quantidade}</td><td class="num mono">${fmtR(r.custoTotal)}</td>
+      <td class="num mono">${fmtR(r.precoRecomendado)}</td><td class="num mono" style="color:var(--ok)">${fmtR(r.lucroR)}</td>
+      <td><span class="badge ${statusClass[p.status]||''}">${p.status}</span></td>
+      <td class="row-actions"><button class="btn ghost small" data-edit-pedido="${p.id}">Editar</button>
+        <button class="btn danger small" data-del-pedido="${p.id}">Excluir</button></td></tr>`; }).join('');
+  return `<h1>Orçamentos</h1><p class="lead">Todos os pedidos salvos, com custo e preço já calculados.</p>
+    <div class="card"><table><thead><tr><th>Nº</th><th>Data</th><th>Cliente</th><th>Produto</th><th>Qtd</th><th>Custo</th><th>Preço</th><th>Lucro</th><th>Status</th><th></th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="10"><div class="empty">Nenhum orçamento salvo ainda. Vá em "Novo orçamento".</div></td></tr>`}</tbody></table></div>`;
+}
+function viewGithub(){
+  const g = github;
+  return `<h1>Sincronização com o GitHub</h1>
+    <p class="lead">Seus dados ficam salvos como um arquivo <code>${g.path||'data.json'}</code> dentro de um repositório <strong>privado</strong>, a cada alteração.</p>
+    <div class="tag-note info">O token fica salvo só neste navegador (localStorage) — nunca é enviado para o repositório nem aparece no código da página.</div>
+    <div class="tag-note">No plano gratuito do GitHub, Pages só publica repositórios <strong>públicos</strong>. Por isso o site (código) fica num repositório público e os dados ficam num repositório <strong>separado e privado</strong> — veja o passo a passo abaixo.</div>
+    <div class="card"><h2>Repositório de dados (privado)</h2><div class="grid">
+        <div class="field"><label>Usuário/organização do GitHub</label><input id="gh-owner" value="${g.owner}" placeholder="ex: gustavo-rocha"></div>
+        <div class="field"><label>Nome do repositório privado de dados</label><input id="gh-repo" value="${g.repo}" placeholder="ex: 028labs-dados"></div>
+        <div class="field"><label>Branch</label><input id="gh-branch" value="${g.branch}" placeholder="main"></div>
+        <div class="field"><label>Caminho do arquivo</label><input id="gh-path" value="${g.path}" placeholder="data.json"></div>
+      </div></div>
+    <div class="card"><h2>Token de acesso pessoal</h2>
+      <p class="card-note">Crie em github.com/settings/tokens → "Fine-grained tokens" → escolha só o repositório de dados (o privado) → permissão "Contents: Read and write".</p>
+      <div class="field"><input id="gh-token" type="password" value="${g.token}" placeholder="github_pat_..."></div>
+      <div style="display:flex; gap:10px; margin-top:16px;">
+        <button class="btn" id="gh-save">Salvar e sincronizar</button>
+        <button class="btn ghost" id="gh-test">Testar conexão</button>
+      </div>
+    </div>
+    <div class="card"><h2>Como publicar (2 repositórios, tudo grátis)</h2>
+      <ol class="steps">
+        <li><strong>Repositório 1 — público, só o site:</strong> crie um repositório (ex: <code>028labs-calculadora</code>), suba este <code>index.html</code> via "Add file → Upload files". Ele não vai conter nenhum dado seu, só o código do app.</li>
+        <li>Vá em <code>Settings → Pages</code> desse repositório → "Deploy from a branch" → <code>main</code> → <code>/root</code>. Em 1-2 min você tem um link tipo <code>https://seu-usuario.github.io/028labs-calculadora/</code>.</li>
+        <li><strong>Repositório 2 — privado, só os dados:</strong> crie outro repositório (ex: <code>028labs-dados</code>) e marque como <strong>Private</strong>. Pode ficar vazio — o app cria o <code>data.json</code> sozinho no primeiro salvamento.</li>
+        <li>Crie o token (passo acima), restrito só a esse repositório privado.</li>
+        <li>Abra o link do site (repositório 1), vá nesta aba "Sincronização" e preencha os campos apontando para o <strong>repositório 2</strong> (o privado) + o token.</li>
+      </ol>
+      <p class="card-note">Resultado: o site é público, mas ninguém vê seus clientes/preços — o <code>data.json</code> só é lido com o seu token, dentro do repositório privado.</p>
+      <p class="card-note">Alternativa, se preferir simplicidade a custo zero: pagar o GitHub Pro (~US$ 4/mês) permite publicar Pages a partir de um único repositório já privado, sem precisar separar em dois.</p>
+    </div>`;
+}
+
+// ---------- events ----------
+function bindEvents(){
+  document.querySelectorAll('#nav button').forEach(b=>{
+    b.onclick = ()=>{ tab=b.dataset.tab; if(tab==='novo' && !editingPedidoId) draft=null; render(); };
+  });
+  document.querySelectorAll('[data-cfg]').forEach(el=>{
+    el.onchange = ()=>{ state.config[el.dataset.cfg] = parseFloat(el.value)||0; queueSync(); render(); };
+  });
+  const addMat = document.getElementById('add-mat');
+  if (addMat) addMat.onclick = ()=>{ state.materiais.push({ id:uid(), nome:'Novo material', marca:'', tipo:'', pesoRolo:1000, precoRolo:0 }); queueSync(); render(); };
+  document.querySelectorAll('[data-mat]').forEach(el=>{
+    el.onchange = ()=>{ const id = el.closest('tr').dataset.id; const m = state.materiais.find(x=>x.id===id); const k = el.dataset.mat;
+      m[k] = (k==='pesoRolo'||k==='precoRolo') ? (parseFloat(el.value)||0) : el.value; queueSync(); render(); };
+  });
+  document.querySelectorAll('[data-del-mat]').forEach(el=>{
+    el.onclick = ()=>{ state.materiais = state.materiais.filter(m=>m.id!==el.dataset.delMat); queueSync(); render(); };
+  });
+  const addImp = document.getElementById('add-imp');
+  if (addImp) addImp.onclick = ()=>{ state.impressoras.push({ id:uid(), nome:'Nova impressora', modelo:'', valorAquisicao:0, vidaUtil:8000, potencia:120, manutencaoMensal:0, horasMes:150 }); queueSync(); render(); };
+  document.querySelectorAll('[data-imp]').forEach(el=>{
+    el.onchange = ()=>{ const id = el.closest('tr').dataset.id; const i = state.impressoras.find(x=>x.id===id); const k = el.dataset.imp;
+      i[k] = (k==='nome'||k==='modelo') ? el.value : (parseFloat(el.value)||0); queueSync(); render(); };
+  });
+  document.querySelectorAll('[data-del-imp]').forEach(el=>{
+    el.onclick = ()=>{ state.impressoras = state.impressoras.filter(i=>i.id!==el.dataset.delImp); queueSync(); render(); };
+  });
+  document.querySelectorAll('[data-p]').forEach(el=>{
+    el.onchange = ()=>{ const k = el.dataset.p;
+      const numericKeys = ['quantidade','peso','tempoImpressao','tempoPreparacao','tempoAcabamento','tempoMontagem','tempoEmbalagem','outrosTempos','acabamentoExtra'];
+      draft[k] = numericKeys.includes(k) ? (parseFloat(el.value)||0) : el.value; render(); };
+  });
+  const saveBtn = document.getElementById('save-pedido');
+  if (saveBtn) saveBtn.onclick = ()=>{
+    if (editingPedidoId){ const idx = state.pedidos.findIndex(p=>p.id===editingPedidoId); state.pedidos[idx] = { ...draft, id: editingPedidoId }; }
+    else { state.pedidos.push({ ...draft, id: uid() }); }
+    queueSync(); editingPedidoId = null; draft = null; tab='lista'; render();
+  };
+  const cancelBtn = document.getElementById('cancel-pedido');
+  if (cancelBtn) cancelBtn.onclick = ()=>{ editingPedidoId=null; draft=null; tab='lista'; render(); };
+  document.querySelectorAll('[data-edit-pedido]').forEach(el=>{
+    el.onclick = ()=>{ editingPedidoId = el.dataset.editPedido; draft = null; tab='novo'; render(); };
+  });
+  document.querySelectorAll('[data-del-pedido]').forEach(el=>{
+    el.onclick = ()=>{ state.pedidos = state.pedidos.filter(p=>p.id!==el.dataset.delPedido); queueSync(); render(); };
+  });
+  const ghSave = document.getElementById('gh-save');
+  if (ghSave) ghSave.onclick = async ()=>{
+    github.owner = document.getElementById('gh-owner').value.trim();
+    github.repo = document.getElementById('gh-repo').value.trim();
+    github.branch = document.getElementById('gh-branch').value.trim() || 'main';
+    github.path = document.getElementById('gh-path').value.trim() || 'data.json';
+    github.token = document.getElementById('gh-token').value.trim();
+    saveSettings();
+    await ghFetch();
+    await ghPush(false);
+    render();
+  };
+  const ghTest = document.getElementById('gh-test');
+  if (ghTest) ghTest.onclick = async ()=>{
+    const owner = document.getElementById('gh-owner').value.trim();
+    const repo = document.getElementById('gh-repo').value.trim();
+    const token = document.getElementById('gh-token').value.trim();
+    setSync('busy','Testando…');
+    try{
+      const res = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers:{ Authorization:`Bearer ${token}`, Accept:'application/vnd.github+json' } });
+      if (!res.ok) throw new Error(`Resposta ${res.status}`);
+      setSync('ok','Conexão OK — repositório encontrado.');
+    } catch(e){ setSync('err','Erro: ' + e.message); }
+  };
+}
+
+init();
+</script>
+</body>
+</html>
