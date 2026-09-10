@@ -32,19 +32,8 @@
     padding:28px 0; display:flex; flex-direction:column;
   }
   .brand{padding:0 20px 24px; border-bottom:1px solid #33312c; margin-bottom:12px;}
-  .brand-logo{
-    display:block;
-    width:150px;
-    max-width:100%;
-    height:auto;
-    margin:0 0 14px;
-  }
-
-.brand .sub{
-  font-size:12px;
-  color:#93908a;
-  margin-top:4px;
-}
+  .brand-logo{display:block; width:150px; max-width:100%; height:auto; margin:0 0 14px;}
+  .brand .sub{font-size:12px; color:#93908a; margin-top:4px;}
   nav{display:flex; flex-direction:column; gap:2px; padding:0 10px;}
   nav button{
     all:unset; cursor:pointer; padding:11px 14px; border-radius:6px; font-size:14px;
@@ -204,12 +193,50 @@ l44 47 -734 -1 -734 -2 -225 -228z"/>
 const LS_SETTINGS_KEY = '028labs_github_settings';
 const LS_DATA_KEY = '028labs_local_cache';
 
+// Valores iniciais de referência para uma pequena operação de impressão 3D
+// em Nova Venécia — ES, com Bambu Lab A1 como impressora principal.
+// São só um ponto de partida: tudo aqui é editável na aba Configurações.
 const DEFAULT_CONFIG = {
-  precoKWh: 0.75, potenciaPadraoW: 120, valorImpressoraPadrao: 2500, vidaUtilPadrao: 8000,
-  manutencaoMensalPadrao: 50, horasMesPadrao: 150, maoObraHora: 25, adminHora: 8,
-  percPerdas: 0.05, percImpostos: 0.06, percMargem: 0.30, percComissao: 0,
-  custoEmbalagem: 4, custoEtiqueta: 0.8, custoConsumiveis: 1.5,
-  descPromocional: 0.10, descAtacado: 0.15
+  // Energia — valor de referência inicial, não é tarifa oficial fixa.
+  // Ajuste pelo valor efetivamente pago na sua conta de luz.
+  precoKWh: 0.95,
+
+  // Impressora padrão (usado só quando um pedido não tem impressora selecionada) — Bambu Lab A1.
+  // 95W é consumo médio de impressão, NÃO a potência máxima da fonte (1300W@220V / 350W@110V é pico, não uso contínuo).
+  potenciaPadraoW: 95,
+  valorImpressoraPadrao: 3500, // preço de referência da A1 no Brasil — varia por loja/promoção/frete/AMS Lite
+  vidaUtilPadrao: 8000,        // premissa de rateio de depreciação, não uma garantia de vida útil real
+  manutencaoMensalPadrao: 50,
+  horasMesPadrao: 180,         // ~6h/dia x 30 dias — parâmetro de rateio, não promessa de uso constante
+
+  // Mão de obra e serviços
+  maoObraHora: 25,        // referência inicial para produção física (preparação, acabamento, montagem etc.)
+  tarifaProjetoHora: 40,  // trabalho técnico de projeto/modelagem vale mais que a hora de produção
+
+  // Custos indiretos / overhead — rateio de despesas administrativas (internet, software, espaço etc.),
+  // nunca duplica energia, depreciação, manutenção ou material, que já são calculados à parte.
+  custosIndiretosHora: 10,
+
+  // Perdas e risco — reservas médias, não previsão exata por peça
+  percPerdas: 0.05,  // 5% de perda de material (purgas, suportes, brim, sobras)
+  percFalha: 0.03,   // 3% de reserva para falhas/reimpressões (não é previsão de que 3% das peças vão falhar)
+
+  // Tributação / margem — estimativas iniciais, ajuste conforme seu regime tributário e canal de venda
+  percImpostos: 0.06,
+  percMargem: 0.30,
+  percComissao: 0, // fica zerado por padrão pois depende do canal de venda (marketplace, cartão, intermediário etc.)
+
+  // Embalagem e consumíveis — total de referência R$6,30/peça para uma operação simples
+  custoEmbalagem: 4,
+  custoEtiqueta: 0.80,
+  custoConsumiveis: 1.50,
+
+  // Descontos comerciais
+  descPromocional: 0.10,
+  descAtacado: 0.15,
+
+  // Segurança comercial — ativado por padrão: não deixa salvar promo/atacado abaixo do preço mínimo
+  impedirPrecoAbaixoMinimo: true
 };
 
 let state = { config: { ...DEFAULT_CONFIG }, materiais: [], impressoras: [], pedidos: [] };
@@ -221,6 +248,58 @@ let tab = 'novo';
 let editingPedidoId = null;
 let draft = null;
 let saveTimer = null;
+let formErrors = [];
+
+// ---------- migrations (keep old saved data working with the new model) ----------
+function migrateConfig(raw){
+  const c = { ...DEFAULT_CONFIG, ...(raw||{}) };
+  if (raw && raw.custosIndiretosHora === undefined && raw.adminHora !== undefined) c.custosIndiretosHora = raw.adminHora;
+  if (raw && raw.tarifaProjetoHora === undefined) c.tarifaProjetoHora = c.maoObraHora;
+  return c;
+}
+function migratePedido(p){
+  return {
+    id: p.id, numero: p.numero, data: p.data, cliente: p.cliente||'', produto: p.produto||'',
+    quantidade: p.quantidade||0, materialId: p.materialId||'', peso: p.peso||0,
+    impressoraId: p.impressoraId||'', tempoImpressao: p.tempoImpressao||0,
+    // tempos por LOTE (não multiplicam pela quantidade)
+    tempoPreparacaoLote: p.tempoPreparacaoLote ?? p.tempoPreparacao ?? 0,
+    tempoConfiguracaoLote: p.tempoConfiguracaoLote ?? 0,
+    tempoPreparacaoMaquinaLote: p.tempoPreparacaoMaquinaLote ?? 0,
+    outrosTemposLote: p.outrosTemposLote ?? 0,
+    // tempos por PEÇA (multiplicam pela quantidade)
+    tempoAcabamentoPeca: p.tempoAcabamentoPeca ?? p.tempoAcabamento ?? 0,
+    tempoMontagemPeca: p.tempoMontagemPeca ?? p.tempoMontagem ?? 0,
+    tempoEmbalagemPeca: p.tempoEmbalagemPeca ?? p.tempoEmbalagem ?? 0,
+    outrosTemposPeca: p.outrosTemposPeca ?? p.outrosTempos ?? 0,
+    // acabamento (materiais)
+    acabamentoExtraValor: p.acabamentoExtraValor ?? p.acabamentoExtra ?? 0,
+    acabamentoExtraModo: p.acabamentoExtraModo ?? 'peca',
+    // produção em fornadas — pedidos antigos vêm com producaoPorFornada:false, preservando
+    // exatamente o comportamento anterior (tempoImpressao interpretado como tempo por PEÇA)
+    producaoPorFornada: p.producaoPorFornada ?? false,
+    pecasPorFornada: p.pecasPorFornada ?? 1,
+    tempoPreparacaoFornada: p.tempoPreparacaoFornada ?? 0,
+    tempoRetiradaFornada: p.tempoRetiradaFornada ?? 0,
+    outrosTemposFornada: p.outrosTemposFornada ?? 0,
+    // AMS Lite / impressão multicolorida
+    usarAmsLite: p.usarAmsLite ?? false,
+    quantidadeCores: p.quantidadeCores ?? 1,
+    modoTempoAms: p.modoTempoAms ?? 'total',
+    tempoAdicionalAmsFornada: p.tempoAdicionalAmsFornada ?? 0,
+    estimarAmsPorTrocas: p.estimarAmsPorTrocas ?? false,
+    numTrocasFornada: p.numTrocasFornada ?? 0,
+    segundosPorTroca: p.segundosPorTroca ?? 0,
+    // serviços adicionais (opcional)
+    modelagem3dHoras: p.modelagem3dHoras ?? 0,
+    alteracaoModeloHoras: p.alteracaoModeloHoras ?? 0,
+    projetoPersonalizadoHoras: p.projetoPersonalizadoHoras ?? 0,
+    prototipagemHoras: p.prototipagemHoras ?? 0,
+    outrosServicosHoras: p.outrosServicosHoras ?? 0,
+    materiaisServicosExtras: p.materiaisServicosExtras ?? 0,
+    status: p.status || 'Orçamento'
+  };
+}
 
 // ---------- github settings (local only, never synced) ----------
 function loadSettings(){
@@ -254,12 +333,27 @@ async function ghFetch(){
     ghSha = json.sha;
     const content = b64Decode(json.content);
     const remote = JSON.parse(content);
-    state = { config:{...DEFAULT_CONFIG, ...remote.config}, materiais:remote.materiais||[], impressoras:remote.impressoras||[], pedidos:remote.pedidos||[] };
+    state = {
+      config: migrateConfig(remote.config),
+      materiais: remote.materiais||[],
+      impressoras: remote.impressoras||[],
+      pedidos: (remote.pedidos||[]).map(migratePedido)
+    };
     localStorage.setItem(LS_DATA_KEY, JSON.stringify(state));
     setSync('ok', 'Sincronizado com o GitHub.');
   } catch(e){
     setSync('err', 'Falha ao buscar do GitHub: ' + e.message);
   }
+}
+// Busca APENAS o SHA mais recente do arquivo remoto, sem tocar em `state`.
+// Usada na resolução de conflitos para nunca sobrescrever silenciosamente o estado local.
+async function ghGetLatestSha(){
+  const url = `https://api.github.com/repos/${github.owner}/${github.repo}/contents/${encodeURIComponent(github.path)}?ref=${github.branch}`;
+  const res = await fetch(url, { headers: { Authorization:`Bearer ${github.token}`, Accept:'application/vnd.github+json' } });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`GitHub respondeu ${res.status}`);
+  const json = await res.json();
+  return json.sha;
 }
 async function ghPush(retry){
   if (!githubConfigured()) { localStorage.setItem(LS_DATA_KEY, JSON.stringify(state)); return; }
@@ -269,7 +363,22 @@ async function ghPush(retry){
     const body = { message:`Atualiza dados — ${new Date().toLocaleString('pt-BR')}`, content: b64Encode(JSON.stringify(state,null,2)), branch: github.branch };
     if (ghSha) body.sha = ghSha;
     const res = await fetch(url, { method:'PUT', headers:{ Authorization:`Bearer ${github.token}`, Accept:'application/vnd.github+json', 'Content-Type':'application/json' }, body: JSON.stringify(body) });
-    if (res.status === 409 && !retry){ await ghFetch(); return ghPush(true); }
+    if (res.status === 409){
+      if (retry){
+        // Já tentamos uma vez preservando o estado local e mesmo assim houve outro conflito.
+        // Não sobrescrevemos nada silenciosamente — avisamos e paramos.
+        setSync('err', 'Conflito de sincronização no GitHub — suas alterações NÃO foram perdidas e continuam só neste navegador. Abra a aba Sincronização e tente salvar novamente.');
+        return;
+      }
+      // Preserva `state` local integralmente. Busca só o SHA mais recente para poder tentar de novo.
+      try{
+        ghSha = await ghGetLatestSha();
+      } catch(shaErr){
+        setSync('err', 'Conflito de sincronização no GitHub e falha ao obter a versão mais recente: ' + shaErr.message);
+        return;
+      }
+      return ghPush(true);
+    }
     if (!res.ok) throw new Error(`GitHub respondeu ${res.status}`);
     const json = await res.json();
     ghSha = json.content.sha;
@@ -297,62 +406,466 @@ function queueSync(){
 
 async function init(){
   loadSettings();
-  try{ const raw = localStorage.getItem(LS_DATA_KEY); if (raw) state = JSON.parse(raw); } catch(e){}
+  try{
+    const raw = localStorage.getItem(LS_DATA_KEY);
+    if (raw){
+      const parsed = JSON.parse(raw);
+      state = {
+        config: migrateConfig(parsed.config),
+        materiais: parsed.materiais||[],
+        impressoras: parsed.impressoras||[],
+        pedidos: (parsed.pedidos||[]).map(migratePedido)
+      };
+    }
+  } catch(e){}
   render();
   if (githubConfigured()) await ghFetch();
-  else if (!state.materiais.length && !state.impressoras.length) seedExample();
+  // Só cadastra os exemplos iniciais (Bambu Lab A1 + PLA/PETG) quando o estado está
+  // completamente vazio — seja porque nunca houve dados locais, seja porque o
+  // repositório do GitHub configurado ainda não tem nenhum dado salvo. Nunca
+  // sobrescreve nem duplica dados já existentes (locais ou vindos do GitHub).
+  if (!state.materiais.length && !state.impressoras.length && !state.pedidos.length) seedExample();
   render();
 }
+// Só roda quando o estado inicial está completamente vazio (nenhum material E nenhuma impressora
+// cadastrados) — nunca sobrescreve nem duplica dados já existentes, seja localmente ou vindos do GitHub.
 function seedExample(){
   state.materiais = [
-    { id: uid(), nome:'PLA Basic', marca:'Bambu Lab', tipo:'PLA', pesoRolo:1000, precoRolo:89.9 },
-    { id: uid(), nome:'PETG HF', marca:'Bambu Lab', tipo:'PETG', pesoRolo:1000, precoRolo:119.9 },
+    { id: 'pla-generico', nome:'PLA', marca:'Genérico', tipo:'PLA', pesoRolo:1000, precoRolo:100 },
+    { id: 'petg-generico', nome:'PETG', marca:'Genérico', tipo:'PETG', pesoRolo:1000, precoRolo:120 },
   ];
   state.impressoras = [
-    { id: uid(), nome:'Bambu Lab A1', modelo:'A1', valorAquisicao:2799, vidaUtil:8000, potencia:100, manutencaoMensal:45, horasMes:150 },
+    { id: 'bambu-a1-padrao', nome:'Bambu Lab A1', modelo:'A1', valorAquisicao:3500, vidaUtil:8000, potencia:95, manutencaoMensal:50, horasMes:180 },
   ];
 }
 function uid(){ return Math.random().toString(36).slice(2,10); }
 
-// ---------- calculations ----------
+// ==================================================================
+// MOTOR DE CÁLCULO
+// DADOS → CUSTOS DIRETOS → RISCO → CUSTOS INDIRETOS → CUSTO TOTAL
+// → PREÇO MÍNIMO → PREÇO RECOMENDADO → DESCONTOS → MARGENS RESULTANTES
+// ==================================================================
 function precoGrama(m){ return m.pesoRolo > 0 ? m.precoRolo / m.pesoRolo : 0; }
 function custoHoraImpressora(imp){
   const dep = imp.vidaUtil > 0 ? imp.valorAquisicao / imp.vidaUtil : 0;
   const man = imp.horasMes > 0 ? imp.manutencaoMensal / imp.horasMes : 0;
   return { dep, man, total: dep + man };
 }
+
+// Pura: preço a partir de um custo total já fechado + configuração de percentuais.
+function computePricing(custoTotal, cfg){
+  const somaPerc = (cfg.percImpostos||0)+(cfg.percComissao||0)+(cfg.percMargem||0);
+  const percentuaisValidos = somaPerc < 1;
+  const denomMin = 1 - (cfg.percImpostos||0) - (cfg.percComissao||0);
+  const denomRec = denomMin - (cfg.percMargem||0);
+  const precoMinimo = denomMin > 0 ? custoTotal / denomMin : 0;
+  const precoRecomendado = (percentuaisValidos && denomRec > 0) ? custoTotal / denomRec : 0;
+
+  function breakdown(preco){
+    const impostoV = preco * (cfg.percImpostos||0);
+    const comissaoV = preco * (cfg.percComissao||0);
+    const lucro = preco - custoTotal - impostoV - comissaoV;
+    const margemReal = preco > 0 ? lucro / preco : 0;
+    const markup = custoTotal > 0 ? (preco / custoTotal - 1) : 0;
+    const abaixoMinimo = preco < precoMinimo - 1e-9;
+    return { preco, impostoV, comissaoV, lucro, margemReal, markup, abaixoMinimo };
+  }
+
+  const recomendado = breakdown(precoRecomendado);
+  const precoPromocional = precoRecomendado * (1 - (cfg.descPromocional||0));
+  const promocional = breakdown(precoPromocional);
+  const precoAtacado = precoRecomendado * (1 - (cfg.descAtacado||0));
+  const atacado = breakdown(precoAtacado);
+
+  return { precoMinimo, recomendado, promocional, atacado, percentuaisValidos };
+}
+
+// Pura: todo o custeio de um pedido, dado config/material/impressora explícitos (testável isoladamente).
+// Pura: calcula quantas fornadas são necessárias e o tamanho da última fornada.
+// Quando produção em fornadas está desativada (ou quantidade <= 1), cada peça é sua própria "fornada",
+// preservando exatamente o comportamento antigo (tempoImpressao × quantidade).
+function calcularFornadas(p){
+  const quantidade = Math.max(0, Number(p.quantidade) || 0);
+
+  if (quantidade <= 1 || !p.producaoPorFornada) {
+    return {
+      quantidade,
+      pecasPorFornada: 1,
+      fornadas: quantidade,
+      ultimaFornada: quantidade
+    };
+  }
+
+  const capacidade = Math.max(1, Math.floor(Number(p.pecasPorFornada) || 1));
+  const fornadas = Math.ceil(quantidade / capacidade);
+  const restante = quantidade % capacidade;
+
+  return {
+    quantidade,
+    pecasPorFornada: capacidade,
+    fornadas,
+    ultimaFornada: restante === 0 ? capacidade : restante
+  };
+}
+// Regra da AMS Lite: nunca somar duas fontes de tempo AMS ao mesmo tempo.
+// - modo 'total': o usuário já informou o tempo real da fornada COM a AMS incluída — não soma nada de novo.
+// - modo 'base': o usuário informou o tempo SEM a AMS + um adicional (direto ou estimado por trocas de filamento).
+function calcularTempoAmsFornada(p){
+  if (!p.usarAmsLite || p.modoTempoAms !== 'base') return 0;
+  if (p.estimarAmsPorTrocas){
+    const trocas = Math.max(0, Number(p.numTrocasFornada) || 0);
+    const segundos = Math.max(0, Number(p.segundosPorTroca) || 0);
+    return (trocas * segundos) / 3600;
+  }
+  return Math.max(0, p.tempoAdicionalAmsFornada || 0);
+}
+function amsCoresValidas(n){ return n >= 1 && n <= 4; }
+
+function calcPedidoCore(p, cfg, mat, imp){
+  const qtd = Math.max(0, p.quantidade||0);
+  const pesoTotal = Math.max(0, p.peso||0) * qtd; // material sempre por PEÇA — fornadas não alteram isso
+
+  // ---- tempo de impressão: por PEÇA (fornadas desligadas) ou por FORNADA (fornadas ligadas) ----
+  // Campo `tempoImpressao` é reinterpretado conforme `producaoPorFornada`, sem renomear/quebrar dados antigos:
+  //   producaoPorFornada = false (padrão dos pedidos antigos) -> tempoImpressao = tempo de UMA peça
+  //   producaoPorFornada = true  -> tempoImpressao = tempo de UMA fornada (várias peças juntas na mesa)
+  const producao = calcularFornadas(p);
+  const tempoAmsFornada = calcularTempoAmsFornada(p);
+  const tempoPorFornadaEfetivo = Math.max(0, p.tempoImpressao||0) + tempoAmsFornada;
+  const tempoImpressaoTotal = (p.producaoPorFornada && qtd > 1)
+    ? tempoPorFornadaEfetivo * producao.fornadas
+    : tempoPorFornadaEfetivo * qtd;
+
+  const horasLote = Math.max(0,p.tempoPreparacaoLote||0) + Math.max(0,p.tempoConfiguracaoLote||0)
+    + Math.max(0,p.tempoPreparacaoMaquinaLote||0) + Math.max(0,p.outrosTemposLote||0);
+  // Tempos por FORNADA: repetem a cada fornada (não a cada peça, não uma única vez para o pedido inteiro)
+  const horasFornadaUnit = Math.max(0,p.tempoPreparacaoFornada||0) + Math.max(0,p.tempoRetiradaFornada||0)
+    + Math.max(0,p.outrosTemposFornada||0);
+  const horasFornadaTotal = horasFornadaUnit * producao.fornadas;
+  const horasPecaUnit = Math.max(0,p.tempoAcabamentoPeca||0) + Math.max(0,p.tempoMontagemPeca||0)
+    + Math.max(0,p.tempoEmbalagemPeca||0) + Math.max(0,p.outrosTemposPeca||0);
+  const horasPecaTotal = horasPecaUnit * qtd;
+
+  // ---- custos diretos ----
+  const pg = mat ? precoGrama(mat) : 0;
+  const custoMaterial = pesoTotal * pg;
+  const perdaMaterial = custoMaterial * (cfg.percPerdas||0);
+  const custoMaterialFinal = custoMaterial + perdaMaterial;
+
+  const potencia = imp ? imp.potencia : cfg.potenciaPadraoW;
+  const custoEnergia = (potencia/1000) * tempoImpressaoTotal * (cfg.precoKWh||0);
+
+  const depHora = imp ? custoHoraImpressora(imp).dep : ((cfg.valorImpressoraPadrao||0)/(cfg.vidaUtilPadrao||1));
+  const manHora = imp ? custoHoraImpressora(imp).man : ((cfg.manutencaoMensalPadrao||0)/(cfg.horasMesPadrao||1));
+  const custoDepreciacao = tempoImpressaoTotal * depHora;
+  const custoManutencao = tempoImpressaoTotal * manHora;
+  const custoMaquina = custoDepreciacao + custoManutencao;
+
+  const maoObraLote = horasLote * (cfg.maoObraHora||0);
+  const maoObraFornada = horasFornadaTotal * (cfg.maoObraHora||0);
+  const maoObraPeca = horasPecaTotal * (cfg.maoObraHora||0);
+  const maoObraTotal = maoObraLote + maoObraFornada + maoObraPeca;
+
+  // ---- risco de falha/reimpressão (sobre custos produtivos, nunca sobre impostos/comissão/margem, nunca por fornada) ----
+  const custoProdutivoAntesRisco = custoMaterialFinal + custoEnergia + custoMaquina + maoObraTotal;
+  const custoRisco = custoProdutivoAntesRisco * (cfg.percFalha||0);
+  const custoProdutivoAposRisco = custoProdutivoAntesRisco + custoRisco;
+
+  // ---- acabamento (materiais), embalagem, serviços de projeto ----
+  const acabamentoMaterial = (p.acabamentoExtraModo === 'lote')
+    ? (p.acabamentoExtraValor||0)
+    : (p.acabamentoExtraValor||0) * qtd;
+  const custoEmbalagemUnit = (cfg.custoEmbalagem||0) + (cfg.custoEtiqueta||0) + (cfg.custoConsumiveis||0);
+  const custoEmbalagem = custoEmbalagemUnit * qtd;
+
+  const horasServicos = Math.max(0,p.modelagem3dHoras||0) + Math.max(0,p.alteracaoModeloHoras||0)
+    + Math.max(0,p.projetoPersonalizadoHoras||0) + Math.max(0,p.prototipagemHoras||0) + Math.max(0,p.outrosServicosHoras||0);
+  const tarifaServico = cfg.tarifaProjetoHora || cfg.maoObraHora || 0;
+  const custoServicos = horasServicos * tarifaServico + (p.materiaisServicosExtras||0);
+
+  // ---- custos indiretos rateados (sobre horas efetivamente trabalhadas, sem duplicar máquina/mão de obra/embalagem) ----
+  const horasProdutivas = tempoImpressaoTotal + horasLote + horasFornadaTotal + horasPecaTotal;
+  const custosIndiretos = horasProdutivas * (cfg.custosIndiretosHora||0);
+
+  // ---- custo total real ----
+  const custoTotal = custoProdutivoAposRisco + acabamentoMaterial + custoEmbalagem + custosIndiretos + custoServicos;
+
+  const pricing = computePricing(custoTotal, cfg);
+  const precoUnitario = qtd > 0 ? pricing.recomendado.preco / qtd : 0;
+
+  return {
+    qtd, pesoTotal, tempoImpressaoTotal, horasLote, horasFornadaTotal, horasPecaTotal, producao,
+    custoMaterial, perdaMaterial, custoMaterialFinal,
+    custoEnergia, custoDepreciacao, custoManutencao, custoMaquina,
+    maoObraLote, maoObraFornada, maoObraPeca, maoObraTotal,
+    custoProdutivoAntesRisco, custoRisco, custoProdutivoAposRisco,
+    acabamentoMaterial, custoEmbalagem, custoServicos, custosIndiretos,
+    custoTotal, precoUnitario,
+    ...pricing
+  };
+}
 function calcPedido(p){
   const cfg = state.config;
   const mat = state.materiais.find(m => m.id === p.materialId);
   const imp = state.impressoras.find(i => i.id === p.impressoraId);
-  const pg = mat ? precoGrama(mat) : 0;
-  const custoMaterialSemPerda = (p.peso || 0) * pg;
-  const perdas = custoMaterialSemPerda * cfg.percPerdas;
-  const custoMaterialTotal = custoMaterialSemPerda + perdas;
-  const potencia = imp ? imp.potencia : cfg.potenciaPadraoW;
-  const consumoKwh = (potencia / 1000) * (p.tempoImpressao || 0);
-  const custoEnergia = consumoKwh * cfg.precoKWh;
-  const custoHoraMaq = imp ? custoHoraImpressora(imp).total
-    : (cfg.valorImpressoraPadrao / cfg.vidaUtilPadrao) + (cfg.manutencaoMensalPadrao / cfg.horasMesPadrao);
-  const custoMaquina = (p.tempoImpressao || 0) * custoHoraMaq;
-  const horasMO = (p.tempoPreparacao||0)+(p.tempoAcabamento||0)+(p.tempoMontagem||0)+(p.tempoEmbalagem||0)+(p.outrosTempos||0);
-  const custoMaoObra = horasMO * cfg.maoObraHora;
-  const custoEmbalagem = cfg.custoEmbalagem + cfg.custoEtiqueta + cfg.custoConsumiveis;
-  const despesasIndiretas = ((p.tempoImpressao||0) + horasMO) * cfg.adminHora;
-  const acabamentoExtra = p.acabamentoExtra || 0;
-  const custoTotal = custoMaterialTotal + custoEnergia + custoMaquina + custoMaoObra + acabamentoExtra + custoEmbalagem + despesasIndiretas;
-  const denomMin = 1 - cfg.percImpostos - cfg.percComissao;
-  const denomRec = denomMin - cfg.percMargem;
-  const precoMinimo = denomMin > 0 ? custoTotal / denomMin : 0;
-  const precoRecomendado = denomRec > 0 ? custoTotal / denomRec : 0;
-  const lucroR = precoRecomendado * cfg.percMargem;
-  const lucroPct = custoTotal > 0 ? lucroR / custoTotal : 0;
-  const precoPromo = precoRecomendado * (1 - cfg.descPromocional);
-  const precoAtacado = precoRecomendado * (1 - cfg.descAtacado);
-  const precoUnitario = p.quantidade > 0 ? precoRecomendado / p.quantidade : 0;
-  return { custoMaterialTotal, custoEnergia, custoMaquina, custoMaoObra, custoEmbalagem,
-    despesasIndiretas, acabamentoExtra, custoTotal, precoMinimo, precoRecomendado,
-    lucroR, lucroPct, precoPromo, precoAtacado, precoUnitario };
+  return calcPedidoCore(p, cfg, mat, imp);
+}
+
+// Comparativo informativo (NÃO é desconto comercial): custo por peça produzindo uma de cada vez
+// vs. custo por peça usando a fornada configurada. Só os custos que realmente variam com o número
+// de fornadas mudam (tempo de máquina, energia, depreciação, manutenção, trabalhos por fornada);
+// custos por peça e custos gerais do pedido permanecem os mesmos nos dois cenários.
+function calcEconomiaFornada(p, cfg, mat, imp){
+  if (!p.producaoPorFornada || !(p.quantidade > 1) || !(p.tempoImpressao > 0)) return null;
+  const comFornada = calcPedidoCore(p, cfg, mat, imp);
+  const semFornada = calcPedidoCore({ ...p, producaoPorFornada:false }, cfg, mat, imp);
+  if (!(comFornada.qtd > 0) || !(semFornada.qtd > 0)) return null;
+  if (comFornada.producao.fornadas >= semFornada.qtd) return null; // sem lote real, nada a comparar
+  const custoUnitCom = comFornada.custoTotal / comFornada.qtd;
+  const custoUnitSem = semFornada.custoTotal / semFornada.qtd;
+  return { custoUnitSem, custoUnitCom, economia: custoUnitSem - custoUnitCom };
+}
+
+function validatePedidoForSave(p, cfg){
+  const errs = [];
+  if (!(p.quantidade > 0)) errs.push('Informe uma quantidade maior que zero.');
+  if (!(p.peso > 0)) errs.push('Informe um peso por peça maior que zero.');
+  if (p.producaoPorFornada){
+    if (!(p.tempoImpressao > 0)) errs.push('Informe o tempo de impressão da fornada.');
+    if (!(p.pecasPorFornada >= 1)) errs.push('Peças por fornada deve ser pelo menos 1.');
+  } else {
+    if (!(p.tempoImpressao > 0)) errs.push('Informe um tempo de impressão por peça maior que zero.');
+  }
+  if (p.usarAmsLite){
+    if (!amsCoresValidas(p.quantidadeCores)) errs.push('Quantidade de cores da AMS deve estar entre 1 e 4.');
+    if ((p.tempoAdicionalAmsFornada||0) < 0) errs.push('Tempo adicional da AMS não pode ser negativo.');
+    if ((p.numTrocasFornada||0) < 0) errs.push('Número de trocas de filamento não pode ser negativo.');
+    if ((p.segundosPorTroca||0) < 0) errs.push('Tempo médio por troca não pode ser negativo.');
+  }
+  if (!p.materialId) errs.push('Selecione um material.');
+  if (!p.impressoraId) errs.push('Selecione uma impressora.');
+  const mat = state.materiais.find(m=>m.id===p.materialId);
+  if (mat && (!(mat.pesoRolo>0) || !(mat.precoRolo>0))) errs.push('O material selecionado tem peso ou preço do rolo zerado/inválido — corrija em Materiais.');
+  const imp = state.impressoras.find(i=>i.id===p.impressoraId);
+  if (imp && (!(imp.vidaUtil>0) || !(imp.horasMes>0))) errs.push('A impressora selecionada tem vida útil ou horas produtivas/mês zeradas — corrija em Impressoras.');
+  const soma = (cfg.percImpostos||0)+(cfg.percComissao||0)+(cfg.percMargem||0);
+  if (soma >= 1) errs.push('Impostos + comissão + margem somam 100% ou mais — ajuste em Configurações antes de salvar.');
+  if (cfg.impedirPrecoAbaixoMinimo && mat && imp){
+    const r = calcPedidoCore(p, cfg, mat, imp);
+    if (r.promocional.abaixoMinimo) errs.push('O preço promocional configurado ficaria abaixo do preço mínimo — ajuste o desconto ou desative essa trava em Configurações.');
+    if (r.atacado.abaixoMinimo) errs.push('O preço de atacado configurado ficaria abaixo do preço mínimo — ajuste o desconto ou desative essa trava em Configurações.');
+  }
+  return errs;
+}
+function pedidoWarnings(p){
+  const warns = [];
+  if (p.quantidade > 0){
+    if (!(p.peso > 0)) warns.push('Peso por peça está zerado — o custo de material não está sendo considerado.');
+    if (p.producaoPorFornada){
+      if (!(p.tempoImpressao > 0)) warns.push('Tempo de impressão por fornada está zerado — energia e custo de máquina não estão sendo considerados.');
+    } else {
+      if (!(p.tempoImpressao > 0)) warns.push('Tempo de impressão por peça está zerado — energia e custo de máquina não estão sendo considerados.');
+    }
+  }
+  if (p.usarAmsLite && (p.quantidadeCores||1) > 1){
+    warns.push('Impressão multicolorida pode aumentar o tempo devido às trocas de filamento. Use o tempo real do Bambu Studio para maior precisão.');
+  }
+  const mat = state.materiais.find(m=>m.id===p.materialId);
+  if (mat && (!(mat.pesoRolo>0) || !(mat.precoRolo>0))) warns.push('O material selecionado tem peso ou preço do rolo inválido — corrija em Materiais.');
+  const imp = state.impressoras.find(i=>i.id===p.impressoraId);
+  if (imp && (!(imp.vidaUtil>0) || !(imp.horasMes>0))) warns.push('A impressora selecionada tem vida útil ou horas produtivas/mês inválidas — corrija em Impressoras.');
+  return warns;
+}
+
+// ==================================================================
+// TESTES AUTOMÁTICOS INTERNOS
+// ==================================================================
+function pedidoTeste(overrides){
+  return {
+    quantidade:1, materialId:'', peso:0, impressoraId:'', tempoImpressao:0,
+    tempoPreparacaoLote:0, tempoConfiguracaoLote:0, tempoPreparacaoMaquinaLote:0, outrosTemposLote:0,
+    tempoAcabamentoPeca:0, tempoMontagemPeca:0, tempoEmbalagemPeca:0, outrosTemposPeca:0,
+    acabamentoExtraValor:0, acabamentoExtraModo:'peca',
+    producaoPorFornada:false, pecasPorFornada:1,
+    tempoPreparacaoFornada:0, tempoRetiradaFornada:0, outrosTemposFornada:0,
+    usarAmsLite:false, quantidadeCores:1, modoTempoAms:'total', tempoAdicionalAmsFornada:0,
+    estimarAmsPorTrocas:false, numTrocasFornada:0, segundosPorTroca:0,
+    modelagem3dHoras:0, alteracaoModeloHoras:0, projetoPersonalizadoHoras:0, prototipagemHoras:0, outrosServicosHoras:0, materiaisServicosExtras:0,
+    ...overrides
+  };
+}
+function runSelfTests(){
+  const out = [];
+  const push = (name, pass, detail) => out.push({ name, pass, detail });
+
+  // Teste 1 — preço recomendado
+  {
+    const cfg = { ...DEFAULT_CONFIG, percImpostos:0.06, percComissao:0, percMargem:0.30 };
+    const r = computePricing(100, cfg);
+    push('Teste 1 — Preço recomendado (custo 100, imposto 6%, margem 30%)',
+      Math.abs(r.recomendado.preco - 156.25) < 0.01,
+      `esperado R$156,25 — obtido R$${r.recomendado.preco.toFixed(2)}`);
+
+    // Teste 2 — margem real
+    push('Teste 2 — Margem líquida real do preço recomendado = 30%',
+      Math.abs(r.recomendado.margemReal - 0.30) < 0.001,
+      `obtido ${(r.recomendado.margemReal*100).toFixed(2)}%`);
+
+    // Teste 3 — desconto promocional reduz margem
+    push('Teste 3 — Desconto promocional reduz a margem líquida',
+      r.promocional.margemReal < r.recomendado.margemReal,
+      `recomendada ${(r.recomendado.margemReal*100).toFixed(1)}% vs promocional ${(r.promocional.margemReal*100).toFixed(1)}%`);
+  }
+
+  // Teste 4 — alerta de preço abaixo do mínimo
+  {
+    const cfg = { ...DEFAULT_CONFIG, percImpostos:0.06, percComissao:0, percMargem:0.30, descPromocional:0.90 };
+    const r = computePricing(100, cfg);
+    push('Teste 4 — Preço abaixo do mínimo gera alerta',
+      r.promocional.abaixoMinimo === true,
+      `preço promocional R$${r.promocional.preco.toFixed(2)} vs mínimo R$${r.precoMinimo.toFixed(2)}`);
+  }
+
+  // Teste 5 — 20 min de preparação de LOTE não multiplicam por 10 peças
+  {
+    const cfg = { ...DEFAULT_CONFIG };
+    const p = pedidoTeste({ quantidade:10, tempoPreparacaoLote: 20/60 });
+    const r = calcPedidoCore(p, cfg, null, null);
+    push('Teste 5 — Preparação de lote (20 min) não escala com 10 peças',
+      Math.abs(r.horasLote*60 - 20) < 0.01,
+      `horasLote = ${(r.horasLote*60).toFixed(1)} min (esperado 20 min, NUNCA 200)`);
+  }
+
+  // Teste 6 — 10 min de acabamento por PEÇA × 10 peças = 100 min
+  {
+    const cfg = { ...DEFAULT_CONFIG };
+    const p = pedidoTeste({ quantidade:10, tempoAcabamentoPeca: 10/60 });
+    const r = calcPedidoCore(p, cfg, null, null);
+    push('Teste 6 — Acabamento por peça (10 min) × 10 peças',
+      Math.abs(r.horasPecaTotal*60 - 100) < 0.01,
+      `horasPecaTotal = ${(r.horasPecaTotal*60).toFixed(1)} min (esperado 100 min)`);
+  }
+
+  // Teste 7 — taxa de falha/reimpressão
+  {
+    const cfg = { ...DEFAULT_CONFIG, percFalha:0.05, percPerdas:0, maoObraHora:0, custosIndiretosHora:0,
+      custoEmbalagem:0, custoEtiqueta:0, custoConsumiveis:0 };
+    const mat = { pesoRolo:1000, precoRolo:100 }; // preço/g = 0.10
+    // 1000g * 0.10 = R$100 de material, sem perdas/energia/máquina/mão de obra
+    const p = pedidoTeste({ quantidade:1, peso:1000, materialId:'m' });
+    const r = calcPedidoCore(p, cfg, mat, null);
+    push('Teste 7 — Risco de falha de 5% sobre custo produtivo de R$100',
+      Math.abs(r.custoRisco - 5) < 0.01 && Math.abs(r.custoProdutivoAposRisco - 105) < 0.01,
+      `custo de risco = R$${r.custoRisco.toFixed(2)} (esperado R$5,00); produtivo após risco = R$${r.custoProdutivoAposRisco.toFixed(2)} (esperado R$105,00)`);
+  }
+
+  // Teste 8 — 1 peça (deve funcionar como sempre funcionou)
+  {
+    const cfg = { ...DEFAULT_CONFIG };
+    const p = pedidoTeste({ quantidade:1, producaoPorFornada:false, tempoImpressao:5 });
+    const r = calcPedidoCore(p, cfg, null, null);
+    push('Teste 8 — 1 peça, tempo de impressão 5h',
+      Math.abs(r.tempoImpressaoTotal - 5) < 0.001,
+      `tempoImpressaoTotal = ${r.tempoImpressaoTotal.toFixed(2)}h (esperado 5h)`);
+  }
+
+  // Teste 9 — 10 peças SEM fornadas: comprova que a lógica antiga continua intacta
+  {
+    const cfg = { ...DEFAULT_CONFIG };
+    const p = pedidoTeste({ quantidade:10, producaoPorFornada:false, tempoImpressao:5 });
+    const r = calcPedidoCore(p, cfg, null, null);
+    push('Teste 9 — 10 peças sem fornadas (5h cada)',
+      Math.abs(r.tempoImpressaoTotal - 50) < 0.001,
+      `tempoImpressaoTotal = ${r.tempoImpressaoTotal.toFixed(2)}h (esperado 50h — lógica antiga preservada)`);
+  }
+
+  // Teste 10 — 10 peças / 5 por fornada = 2 fornadas de 5h = 10h de máquina (não 50h)
+  {
+    const cfg = { ...DEFAULT_CONFIG };
+    const p = pedidoTeste({ quantidade:10, producaoPorFornada:true, pecasPorFornada:5, tempoImpressao:5 });
+    const r = calcPedidoCore(p, cfg, null, null);
+    push('Teste 10 — 10 peças / 5 por fornada / 5h por fornada',
+      r.producao.fornadas === 2 && Math.abs(r.tempoImpressaoTotal - 10) < 0.001,
+      `fornadas = ${r.producao.fornadas} (esperado 2), tempoImpressaoTotal = ${r.tempoImpressaoTotal.toFixed(2)}h (esperado 10h, NUNCA 50h)`);
+  }
+
+  // Teste 11 — 23 peças / 5 por fornada: 5 fornadas, última com 3 peças
+  {
+    const r = calcularFornadas({ quantidade:23, producaoPorFornada:true, pecasPorFornada:5 });
+    push('Teste 11 — 23 peças / 5 por fornada',
+      r.fornadas === 5 && r.ultimaFornada === 3,
+      `fornadas = ${r.fornadas} (esperado 5), última fornada = ${r.ultimaFornada} peças (esperado 3)`);
+  }
+
+  // Teste 12 — material não muda com fornadas (continua por PEÇA)
+  {
+    const cfg = { ...DEFAULT_CONFIG, percPerdas:0 };
+    const mat = { pesoRolo:1000, precoRolo:0 };
+    const p = pedidoTeste({ quantidade:20, peso:100, producaoPorFornada:true, pecasPorFornada:5, tempoImpressao:1 });
+    const r = calcPedidoCore(p, cfg, mat, null);
+    push('Teste 12 — Material continua por peça mesmo com fornadas (20×100g)',
+      Math.abs(r.pesoTotal - 2000) < 0.001,
+      `pesoTotal = ${r.pesoTotal.toFixed(0)}g (esperado 2000g)`);
+  }
+
+  // Teste 13 — acabamento continua por PEÇA mesmo com fornadas ativas
+  {
+    const cfg = { ...DEFAULT_CONFIG };
+    const p = pedidoTeste({ quantidade:20, tempoAcabamentoPeca:10/60, producaoPorFornada:true, pecasPorFornada:5, tempoImpressao:1 });
+    const r = calcPedidoCore(p, cfg, null, null);
+    push('Teste 13 — Acabamento por peça (10 min) × 20 peças, com fornadas ativas',
+      Math.abs(r.horasPecaTotal*60 - 200) < 0.01,
+      `horasPecaTotal = ${(r.horasPecaTotal*60).toFixed(1)} min (esperado 200 min)`);
+  }
+
+  // Teste 14 — preparação POR FORNADA (10 min) × 4 fornadas = 40 min
+  {
+    const cfg = { ...DEFAULT_CONFIG };
+    const p = pedidoTeste({ quantidade:20, producaoPorFornada:true, pecasPorFornada:5, tempoImpressao:1, tempoPreparacaoFornada:10/60 });
+    const r = calcPedidoCore(p, cfg, null, null);
+    push('Teste 14 — Preparação por fornada (10 min) × 4 fornadas',
+      r.producao.fornadas === 4 && Math.abs(r.horasFornadaTotal*60 - 40) < 0.01,
+      `fornadas = ${r.producao.fornadas} (esperado 4), horasFornadaTotal = ${(r.horasFornadaTotal*60).toFixed(1)} min (esperado 40 min)`);
+  }
+
+  // Teste 15 — energia/máquina usam o TEMPO TOTAL REAL da máquina: 4 fornadas × 6h = 24h (não 120h)
+  {
+    const cfg = { ...DEFAULT_CONFIG };
+    const p = pedidoTeste({ quantidade:20, producaoPorFornada:true, pecasPorFornada:5, tempoImpressao:6 });
+    const r = calcPedidoCore(p, cfg, null, null);
+    push('Teste 15 — 20 peças / 5 por fornada / 6h por fornada = 24h de máquina',
+      Math.abs(r.tempoImpressaoTotal - 24) < 0.001,
+      `tempoImpressaoTotal = ${r.tempoImpressaoTotal.toFixed(2)}h (esperado 24h, NUNCA 120h)`);
+  }
+
+  // Teste 16 — AMS por tempo adicional: base 5h + AMS 1h = 6h (modo 'base')
+  {
+    const cfg = { ...DEFAULT_CONFIG };
+    const p = pedidoTeste({ quantidade:1, tempoImpressao:5, usarAmsLite:true, modoTempoAms:'base', tempoAdicionalAmsFornada:1 });
+    const r = calcPedidoCore(p, cfg, null, null);
+    push('Teste 16 — AMS modo base: 5h + 1h adicional = 6h',
+      Math.abs(r.tempoImpressaoTotal - 6) < 0.001,
+      `tempoImpressaoTotal = ${r.tempoImpressaoTotal.toFixed(2)}h (esperado 6h)`);
+  }
+
+  // Teste 17 — AMS não duplica: modo 'total' já é o tempo completo, não soma tempoAdicionalAmsFornada de novo
+  {
+    const cfg = { ...DEFAULT_CONFIG };
+    const p = pedidoTeste({ quantidade:1, tempoImpressao:6, usarAmsLite:true, modoTempoAms:'total', tempoAdicionalAmsFornada:1 });
+    const r = calcPedidoCore(p, cfg, null, null);
+    push('Teste 17 — AMS modo total (6h) não soma adicional de novo',
+      Math.abs(r.tempoImpressaoTotal - 6) < 0.001,
+      `tempoImpressaoTotal = ${r.tempoImpressaoTotal.toFixed(2)}h (esperado 6h, NUNCA 7h)`);
+  }
+
+  // Teste 18 — validação de quantidade de cores da AMS (1 a 4)
+  {
+    push('Teste 18 — Quantidade de cores da AMS (1–4 válido, 5 inválido)',
+      amsCoresValidas(4) === true && amsCoresValidas(5) === false && amsCoresValidas(1) === true && amsCoresValidas(0) === false,
+      `cores=4 → ${amsCoresValidas(4)} (esperado true); cores=5 → ${amsCoresValidas(5)} (esperado false)`);
+  }
+
+  return out;
 }
 
 const fmtR = n => (isFinite(n)?n:0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
@@ -370,53 +883,69 @@ function render(){
   else if (tab==='novo') m.innerHTML = viewNovoPedido();
   else if (tab==='lista') m.innerHTML = viewListaPedidos();
   else if (tab==='github') m.innerHTML = viewGithub();
+  else if (tab==='testes') m.innerHTML = viewTestes();
   bindEvents();
 }
 function renderNav(){
   const items = [['novo','Novo orçamento'],['lista','Orçamentos'],['materiais','Materiais'],
-    ['impressoras','Impressoras'],['config','Configurações'],['github','Sincronização']];
+    ['impressoras','Impressoras'],['config','Configurações'],['testes','Testes'],['github','Sincronização']];
   document.getElementById('nav').innerHTML = items.map(([id,label]) =>
     `<button data-tab="${id}" class="${tab===id?'active':''}">${label}</button>`).join('');
 }
 function fieldNum(key, val, label, step='0.01'){
-  return `<div class="field"><label>${label}</label><input type="number" step="${step}" data-cfg="${key}" value="${val}"></div>`;
+  return `<div class="field"><label>${label}</label><input type="number" min="0" step="${step}" data-cfg="${key}" value="${val}"></div>`;
+}
+function fieldCheckbox(key, checked, label){
+  return `<div class="field"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+    <input type="checkbox" data-cfgbool="${key}" ${checked?'checked':''} style="width:auto;">${label}</label></div>`;
 }
 function viewConfig(){
   const c = state.config;
+  const soma = (c.percImpostos||0)+(c.percComissao||0)+(c.percMargem||0);
   return `<h1>Configurações</h1><p class="lead">Esses valores alimentam todos os cálculos automaticamente.</p>
+    ${soma>=1 ? `<div class="tag-note err">⚠️ Impostos + comissão + margem somam ${fmtP(soma)} — nenhum preço poderá ser calculado enquanto isso não for corrigido.</div>` : ''}
+    <div class="card"><p class="card-note" style="margin:0;"><strong>Valores iniciais de referência:</strong> configurados para uma operação pequena de impressão 3D com Bambu Lab A1 no Espírito Santo. Ajuste energia, custos, mão de obra, impostos e preços dos materiais conforme sua realidade.</p></div>
     <div class="card"><h2>Energia e máquina (padrão)</h2>
-      <p class="card-note">Usado quando um pedido não tem impressora selecionada.</p>
+      <p class="card-note">Usado quando um pedido não tem impressora selecionada. "Potência" aqui é consumo médio estimado, não a potência nominal da fonte.</p>
       <div class="grid">
         ${fieldNum('precoKWh', c.precoKWh, 'Energia elétrica (R$/kWh)')}
-        ${fieldNum('potenciaPadraoW', c.potenciaPadraoW, 'Potência padrão (W)', '1')}
+        ${fieldNum('potenciaPadraoW', c.potenciaPadraoW, 'Potência média de consumo padrão (W)', '1')}
         ${fieldNum('valorImpressoraPadrao', c.valorImpressoraPadrao, 'Valor impressora padrão (R$)')}
         ${fieldNum('vidaUtilPadrao', c.vidaUtilPadrao, 'Vida útil padrão (h)', '1')}
         ${fieldNum('manutencaoMensalPadrao', c.manutencaoMensalPadrao, 'Manutenção mensal padrão (R$)')}
-        ${fieldNum('horasMesPadrao', c.horasMesPadrao, 'Horas trabalhadas/mês padrão', '1')}
+        ${fieldNum('horasMesPadrao', c.horasMesPadrao, 'Horas produtivas/mês padrão', '1')}
       </div></div>
-    <div class="card"><h2>Mão de obra e despesas</h2><div class="grid">
-        ${fieldNum('maoObraHora', c.maoObraHora, 'Mão de obra (R$/h)')}
-        ${fieldNum('adminHora', c.adminHora, 'Despesas indiretas (R$/h)')}
-        ${fieldNum('custoEmbalagem', c.custoEmbalagem, 'Embalagem (R$)')}
-        ${fieldNum('custoEtiqueta', c.custoEtiqueta, 'Etiqueta (R$)')}
-        ${fieldNum('custoConsumiveis', c.custoConsumiveis, 'Outros consumíveis (R$)')}
-      </div></div>
-    <div class="card"><h2>Perdas, impostos e margem</h2><div class="grid">
-        ${fieldNum('percPerdas', c.percPerdas, 'Perdas/desperdício (0–1)')}
+    <div class="card"><h2>Mão de obra, serviços e custos indiretos</h2><div class="grid">
+        ${fieldNum('maoObraHora', c.maoObraHora, 'Mão de obra produtiva (R$/h)')}
+        ${fieldNum('tarifaProjetoHora', c.tarifaProjetoHora, 'Tarifa de projeto/modelagem (R$/h)')}
+        ${fieldNum('custosIndiretosHora', c.custosIndiretosHora, 'Custos indiretos / overhead (R$/hora produtiva)')}
+        ${fieldNum('custoEmbalagem', c.custoEmbalagem, 'Embalagem por peça (R$)')}
+        ${fieldNum('custoEtiqueta', c.custoEtiqueta, 'Etiqueta por peça (R$)')}
+        ${fieldNum('custoConsumiveis', c.custoConsumiveis, 'Outros consumíveis por peça (R$)')}
+      </div>
+      <p class="card-note" style="margin-top:10px;">"Custos indiretos / overhead" é o rateio de despesas administrativas/estruturais (aluguel, internet, software etc.) — não é depreciação nem custo direto da máquina, que já são calculados separadamente.</p>
+      </div>
+    <div class="card"><h2>Perdas, risco, impostos e margem</h2>
+      <p class="card-note">"Reserva para falhas/reimpressões" não é uma previsão de que essa % das peças vai falhar — é uma reserva de custo incorporada ao preço para cobrir o risco médio de ter que refazer uma impressão.</p>
+      <div class="grid">
+        ${fieldNum('percPerdas', c.percPerdas, 'Perdas de material (0–1)')}
+        ${fieldNum('percFalha', c.percFalha, 'Reserva para falhas/reimpressões (0–1)')}
         ${fieldNum('percImpostos', c.percImpostos, 'Impostos (0–1)')}
-        ${fieldNum('percMargem', c.percMargem, 'Margem de lucro (0–1)')}
+        ${fieldNum('percMargem', c.percMargem, 'Margem líquida desejada (0–1)')}
         ${fieldNum('percComissao', c.percComissao, 'Comissão (0–1)')}
         ${fieldNum('descPromocional', c.descPromocional, 'Desconto promocional (0–1)')}
         ${fieldNum('descAtacado', c.descAtacado, 'Desconto atacado (0–1)')}
-      </div></div>`;
+      </div>
+      <div style="margin-top:14px;">${fieldCheckbox('impedirPrecoAbaixoMinimo', !!c.impedirPrecoAbaixoMinimo, 'Impedir salvar orçamentos com preço promocional/atacado abaixo do mínimo')}</div>
+    </div>`;
 }
 function viewMateriais(){
   const rows = state.materiais.map(m => `<tr data-id="${m.id}">
       <td><input data-mat="nome" value="${m.nome}" style="min-width:120px"></td>
       <td><input data-mat="marca" value="${m.marca||''}" style="min-width:90px"></td>
       <td><input data-mat="tipo" value="${m.tipo||''}" style="width:70px"></td>
-      <td><input data-mat="pesoRolo" type="number" step="1" value="${m.pesoRolo}" style="width:80px" class="num"></td>
-      <td><input data-mat="precoRolo" type="number" step="0.01" value="${m.precoRolo}" style="width:90px" class="num"></td>
+      <td><input data-mat="pesoRolo" type="number" min="0" step="1" value="${m.pesoRolo}" style="width:80px" class="num"></td>
+      <td><input data-mat="precoRolo" type="number" min="0" step="0.01" value="${m.precoRolo}" style="width:90px" class="num"></td>
       <td class="num mono">${fmtR(precoGrama(m))}</td>
       <td><button class="btn danger small" data-del-mat="${m.id}">Remover</button></td></tr>`).join('');
   return `<h1>Materiais</h1><p class="lead">Cadastre seus filamentos. O custo por grama é calculado sozinho.</p>
@@ -426,96 +955,244 @@ function viewMateriais(){
         <tbody>${rows || `<tr><td colspan="7"><div class="empty">Nenhum material cadastrado ainda.</div></td></tr>`}</tbody></table></div>`;
 }
 function viewImpressoras(){
-  const rows = state.impressoras.map(i => { const c = custoHoraImpressora(i); return `<tr data-id="${i.id}">
+  const rows = state.impressoras.map(i => { const c = custoHoraImpressora(i);
+    const invalida = !(i.vidaUtil>0) || !(i.horasMes>0);
+    return `<tr data-id="${i.id}">
       <td><input data-imp="nome" value="${i.nome}" style="min-width:130px"></td>
       <td><input data-imp="modelo" value="${i.modelo||''}" style="width:80px"></td>
-      <td><input data-imp="valorAquisicao" type="number" step="0.01" value="${i.valorAquisicao}" style="width:90px" class="num"></td>
-      <td><input data-imp="vidaUtil" type="number" step="1" value="${i.vidaUtil}" style="width:80px" class="num"></td>
-      <td><input data-imp="potencia" type="number" step="1" value="${i.potencia}" style="width:70px" class="num"></td>
-      <td><input data-imp="manutencaoMensal" type="number" step="0.01" value="${i.manutencaoMensal}" style="width:80px" class="num"></td>
-      <td><input data-imp="horasMes" type="number" step="1" value="${i.horasMes}" style="width:70px" class="num"></td>
+      <td><input data-imp="valorAquisicao" type="number" min="0" step="0.01" value="${i.valorAquisicao}" style="width:90px" class="num"></td>
+      <td><input data-imp="vidaUtil" type="number" min="0" step="1" value="${i.vidaUtil}" style="width:80px" class="num" ${invalida&&!(i.vidaUtil>0)?'style="border-color:var(--danger)"':''}></td>
+      <td><input data-imp="potencia" type="number" min="0" step="1" value="${i.potencia}" style="width:70px" class="num"></td>
+      <td><input data-imp="manutencaoMensal" type="number" min="0" step="0.01" value="${i.manutencaoMensal}" style="width:80px" class="num"></td>
+      <td><input data-imp="horasMes" type="number" min="0" step="1" value="${i.horasMes}" style="width:70px" class="num"></td>
       <td class="num mono">${fmtR(c.total)}</td>
-      <td><button class="btn danger small" data-del-imp="${i.id}">Remover</button></td></tr>`;}).join('');
-  return `<h1>Impressoras</h1><p class="lead">Cadastre suas máquinas. O custo por hora é calculado sozinho.</p>
+      <td><button class="btn danger small" data-del-imp="${i.id}">Remover</button></td></tr>${invalida?`<tr><td colspan="9" style="color:var(--danger); font-size:11.5px; padding:2px 10px 8px;">⚠️ Vida útil e horas/mês precisam ser maiores que zero para calcular o custo de máquina desta impressora.</td></tr>`:''}`;}).join('');
+  return `<h1>Impressoras</h1><p class="lead">Cadastre suas máquinas. O custo por hora (depreciação + manutenção) é calculado sozinho.</p>
     <div class="card"><div class="toolbar"><h2 style="margin:0">Impressoras cadastradas</h2>
         <button class="btn" id="add-imp">+ Adicionar impressora</button></div>
-      <table><thead><tr><th>Nome</th><th>Modelo</th><th>Valor (R$)</th><th>Vida útil (h)</th><th>Potência (W)</th><th>Manut./mês (R$)</th><th>h/mês</th><th>R$/h <span class="lock-tag">calc</span></th><th></th></tr></thead>
+      <table><thead><tr><th>Nome</th><th>Modelo</th><th>Valor (R$)</th><th>Vida útil (h)</th><th>Potência média (W)</th><th>Manut./mês (R$)</th><th>h produtivas/mês</th><th>R$/h <span class="lock-tag">calc</span></th><th></th></tr></thead>
         <tbody>${rows || `<tr><td colspan="9"><div class="empty">Nenhuma impressora cadastrada ainda.</div></td></tr>`}</tbody></table></div>`;
 }
 function emptyPedido(){
   return { id:null, numero: nextNumero(), data: new Date().toISOString().slice(0,10), cliente:'', produto:'',
-    quantidade:1, materialId: state.materiais[0]?.id||'', peso:0, impressoraId: state.impressoras[0]?.id||'',
-    tempoImpressao:0, tempoPreparacao:0, tempoAcabamento:0, tempoMontagem:0, tempoEmbalagem:0, outrosTempos:0,
-    acabamentoExtra:0, status:'Orçamento' };
+    quantidade:0, materialId: state.materiais[0]?.id||'', peso:0, impressoraId: state.impressoras[0]?.id||'',
+    tempoImpressao:0,
+    tempoPreparacaoLote:0, tempoConfiguracaoLote:0, tempoPreparacaoMaquinaLote:0, outrosTemposLote:0,
+    tempoAcabamentoPeca:0, tempoMontagemPeca:0, tempoEmbalagemPeca:0, outrosTemposPeca:0,
+    acabamentoExtraValor:0, acabamentoExtraModo:'peca',
+    producaoPorFornada:false, pecasPorFornada:1,
+    tempoPreparacaoFornada:0, tempoRetiradaFornada:0, outrosTemposFornada:0,
+    usarAmsLite:false, quantidadeCores:1, modoTempoAms:'total', tempoAdicionalAmsFornada:0,
+    estimarAmsPorTrocas:false, numTrocasFornada:0, segundosPorTroca:0,
+    modelagem3dHoras:0, alteracaoModeloHoras:0, projetoPersonalizadoHoras:0, prototipagemHoras:0, outrosServicosHoras:0, materiaisServicosExtras:0,
+    status:'Orçamento' };
 }
 function nextNumero(){ return (state.pedidos.reduce((mx,p)=>Math.max(mx,p.numero||0),0) || 0) + 1; }
+
+function alertaAbaixoMinimo(b){
+  return b.abaixoMinimo ? `<div class="tag-note err" style="margin:8px 0 0;">⚠️ PREÇO ABAIXO DO MÍNIMO</div>` : '';
+}
 
 function viewNovoPedido(){
   if (!draft) draft = editingPedidoId ? { ...state.pedidos.find(p=>p.id===editingPedidoId) } : emptyPedido();
   const r = calcPedido(draft);
+  const matSel = state.materiais.find(m=>m.id===draft.materialId);
+  const impSel = state.impressoras.find(i=>i.id===draft.impressoraId);
+  const economia = calcEconomiaFornada(draft, state.config, matSel, impSel);
   const matOpts = state.materiais.map(m=>`<option value="${m.id}" ${m.id===draft.materialId?'selected':''}>${m.nome}</option>`).join('');
   const impOpts = state.impressoras.map(i=>`<option value="${i.id}" ${i.id===draft.impressoraId?'selected':''}>${i.nome}</option>`).join('');
   const noRes = !state.materiais.length || !state.impressoras.length;
+  const precoInvalido = !r.percentuaisValidos;
+  const warnings = pedidoWarnings(draft);
+  const mostraFornadas = draft.quantidade > 1;
+  const producaoAtiva = draft.producaoPorFornada && mostraFornadas;
+  const producaoCalc = calcularFornadas(draft);
+
+  const tempoLabel = producaoAtiva ? 'Tempo de impressão por fornada (h)' : 'Tempo de impressão por peça (h)';
+  const tempoDesc = producaoAtiva
+    ? 'Tempo necessário para imprimir todas as peças colocadas simultaneamente na mesa. Use o tempo real informado pelo Bambu Studio.'
+    : 'Tempo necessário para imprimir uma única unidade.';
+
   return `<h1>${editingPedidoId?'Editar':'Novo'} orçamento</h1><p class="lead">Preencha os dados da peça — o custo e o preço são calculados na hora.</p>
     ${noRes ? `<div class="tag-note">Cadastre ao menos 1 material e 1 impressora antes de gerar um orçamento.</div>` : ''}
+    ${formErrors.length ? `<div class="tag-note err">${formErrors.map(e=>'⚠️ '+e).join('<br>')}</div>` : ''}
+    ${(!formErrors.length && warnings.length) ? `<div class="tag-note">${warnings.map(w=>'⚠️ '+w).join('<br>')}</div>` : ''}
     <div class="two-col"><div>
         <div class="card"><h2>Dados do pedido</h2><div class="grid">
             <div class="field locked"><label>Nº orçamento <span class="lock-tag">auto</span></label><input value="${draft.numero}" disabled></div>
             <div class="field"><label>Data</label><input type="date" data-p="data" value="${draft.data}"></div>
             <div class="field"><label>Cliente</label><input data-p="cliente" value="${draft.cliente}"></div>
             <div class="field"><label>Produto/Peça</label><input data-p="produto" value="${draft.produto}"></div>
-            <div class="field"><label>Quantidade</label><input type="number" step="1" data-p="quantidade" value="${draft.quantidade}"></div>
+            <div class="field"><label>Quantidade</label><input type="number" min="0" step="1" data-p="quantidade" value="${draft.quantidade}"></div>
             <div class="field"><label>Status</label><select data-p="status">${STATUS.map(s=>`<option ${s===draft.status?'selected':''}>${s}</option>`).join('')}</select></div>
           </div></div>
-        <div class="card"><h2>Material e impressora</h2><div class="grid">
+        <div class="card"><h2>Material e impressão</h2><div class="grid">
             <div class="field"><label>Material</label><select data-p="materialId">${matOpts}</select></div>
-            <div class="field"><label>Peso total estimado (g)</label><input type="number" step="1" data-p="peso" value="${draft.peso}"></div>
+            <div class="field"><label>Peso por peça (g)</label><input type="number" min="0" step="1" data-p="peso" value="${draft.peso}"></div>
             <div class="field"><label>Impressora</label><select data-p="impressoraId">${impOpts}</select></div>
-            <div class="field"><label>Tempo de impressão total (h)</label><input type="number" step="0.1" data-p="tempoImpressao" value="${draft.tempoImpressao}"></div>
+            <div class="field"><label>${tempoLabel}</label><input type="number" min="0" step="0.1" data-p="tempoImpressao" value="${draft.tempoImpressao}"></div>
+          </div>
+          <p class="card-note" style="margin-top:10px;">${tempoDesc}</p></div>
+        ${mostraFornadas ? `
+        <div class="card"><h2>Produção em fornadas</h2>
+          <p class="card-note">Produção em fornadas permite colocar várias unidades iguais na mesa ao mesmo tempo. O custo de máquina é calculado pelo número de fornadas e pelo tempo real de impressão, enquanto material, acabamento, montagem e embalagem continuam sendo calculados por peça.</p>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:${draft.producaoPorFornada?'14px':'0'};">
+            <input type="checkbox" data-p-bool="producaoPorFornada" ${draft.producaoPorFornada?'checked':''} style="width:auto;">
+            Produzir várias peças por fornada
+          </label>
+          ${draft.producaoPorFornada ? `
+          <div class="grid">
+            <div class="field"><label>Peças por fornada</label><input type="number" min="1" step="1" data-p="pecasPorFornada" value="${draft.pecasPorFornada}"></div>
+            <div class="field locked"><label>Fornadas necessárias <span class="lock-tag">calc</span></label><input value="${producaoCalc.fornadas}" disabled></div>
+            <div class="field locked"><label>Última fornada <span class="lock-tag">calc</span></label><input value="${producaoCalc.ultimaFornada} peças" disabled></div>
+          </div>` : ''}
+        </div>` : ''}
+        <div class="card"><h2>AMS Lite / impressão multicolorida <span class="lock-tag">opcional</span></h2>
+          <p class="card-note">O AMS Lite permite impressão multicolorida, mas as trocas de filamento podem aumentar bastante o tempo de impressão. Para precificação precisa, informe o tempo real mostrado pelo Bambu Studio.</p>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:${draft.usarAmsLite?'14px':'0'};">
+            <input type="checkbox" data-p-bool="usarAmsLite" ${draft.usarAmsLite?'checked':''} style="width:auto;">
+            Usar AMS Lite
+          </label>
+          ${draft.usarAmsLite ? `
+          <div class="grid">
+            <div class="field"><label>Quantidade de cores (1–4)</label><input type="number" min="1" max="4" step="1" data-p="quantidadeCores" value="${draft.quantidadeCores}"></div>
+            <div class="field"><label>Modo de tempo</label><select data-p="modoTempoAms">
+                <option value="total" ${draft.modoTempoAms==='total'?'selected':''}>Informar tempo TOTAL (já com AMS)</option>
+                <option value="base" ${draft.modoTempoAms==='base'?'selected':''}>Informar tempo BASE + adicional AMS</option>
+              </select></div>
+          </div>
+          ${draft.modoTempoAms==='base' ? `
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:12px 0;">
+            <input type="checkbox" data-p-bool="estimarAmsPorTrocas" ${draft.estimarAmsPorTrocas?'checked':''} style="width:auto;">
+            Estimar tempo AMS por número de trocas de filamento
+          </label>
+          <div class="grid">
+            ${draft.estimarAmsPorTrocas ? `
+            <div class="field"><label>Número de trocas na fornada</label><input type="number" min="0" step="1" data-p="numTrocasFornada" value="${draft.numTrocasFornada}"></div>
+            <div class="field"><label>Tempo médio por troca (segundos)</label><input type="number" min="0" step="1" data-p="segundosPorTroca" value="${draft.segundosPorTroca}"></div>
+            <div class="field locked"><label>Tempo AMS estimado (h) <span class="lock-tag">calc</span></label><input value="${calcularTempoAmsFornada(draft).toFixed(2)}" disabled></div>
+            ` : `
+            <div class="field"><label>Tempo adicional AMS (h)</label><input type="number" min="0" step="0.1" data-p="tempoAdicionalAmsFornada" value="${draft.tempoAdicionalAmsFornada}"></div>
+            `}
+          </div>` : ''}
+          <p class="card-note" style="margin-top:10px;">Cores utilizadas: ${draft.quantidadeCores}${draft.quantidadeCores>1 ? ' — ⚠️ mais cores podem aumentar o tempo de impressão devido às trocas de filamento.' : ''}</p>
+          ` : ''}
+        </div>
+        <div class="card"><h2>Tempos por LOTE <span class="lock-tag">não multiplica pela quantidade nem por fornadas</span></h2>
+          <p class="card-note">Trabalho feito uma única vez para o pedido inteiro, independente de quantas peças ou fornadas.</p><div class="grid">
+            <div class="field"><label>Preparação (h)</label><input type="number" min="0" step="0.1" data-p="tempoPreparacaoLote" value="${draft.tempoPreparacaoLote}"></div>
+            <div class="field"><label>Configuração (h)</label><input type="number" min="0" step="0.1" data-p="tempoConfiguracaoLote" value="${draft.tempoConfiguracaoLote}"></div>
+            <div class="field"><label>Preparação da máquina (h)</label><input type="number" min="0" step="0.1" data-p="tempoPreparacaoMaquinaLote" value="${draft.tempoPreparacaoMaquinaLote}"></div>
+            <div class="field"><label>Outros trabalhos gerais (h)</label><input type="number" min="0" step="0.1" data-p="outrosTemposLote" value="${draft.outrosTemposLote}"></div>
           </div></div>
-        <div class="card"><h2>Tempos de trabalho (total do pedido)</h2><div class="grid">
-            <div class="field"><label>Preparação (h)</label><input type="number" step="0.1" data-p="tempoPreparacao" value="${draft.tempoPreparacao}"></div>
-            <div class="field"><label>Acabamento (h)</label><input type="number" step="0.1" data-p="tempoAcabamento" value="${draft.tempoAcabamento}"></div>
-            <div class="field"><label>Montagem (h)</label><input type="number" step="0.1" data-p="tempoMontagem" value="${draft.tempoMontagem}"></div>
-            <div class="field"><label>Embalagem (h)</label><input type="number" step="0.1" data-p="tempoEmbalagem" value="${draft.tempoEmbalagem}"></div>
-            <div class="field"><label>Outros tempos (h)</label><input type="number" step="0.1" data-p="outrosTempos" value="${draft.outrosTempos}"></div>
-            <div class="field"><label>Acabamento — materiais extras (R$)</label><input type="number" step="0.01" data-p="acabamentoExtra" value="${draft.acabamentoExtra}"></div>
+        ${producaoAtiva ? `
+        <div class="card"><h2>Tempos por FORNADA <span class="lock-tag">multiplica pelo número de fornadas</span></h2>
+          <p class="card-note">Trabalho que precisa ser repetido a cada nova fornada (ex.: trocar a mesa, retirar as peças).</p><div class="grid">
+            <div class="field"><label>Preparação da fornada (h)</label><input type="number" min="0" step="0.1" data-p="tempoPreparacaoFornada" value="${draft.tempoPreparacaoFornada}"></div>
+            <div class="field"><label>Retirada/limpeza da mesa (h)</label><input type="number" min="0" step="0.1" data-p="tempoRetiradaFornada" value="${draft.tempoRetiradaFornada}"></div>
+            <div class="field"><label>Outros trabalhos por fornada (h)</label><input type="number" min="0" step="0.1" data-p="outrosTemposFornada" value="${draft.outrosTemposFornada}"></div>
+          </div></div>` : ''}
+        <div class="card"><h2>Tempos por PEÇA <span class="lock-tag">multiplica pela quantidade</span></h2>
+          <p class="card-note">Trabalho repetido em cada unidade produzida.</p><div class="grid">
+            <div class="field"><label>Acabamento (h)</label><input type="number" min="0" step="0.1" data-p="tempoAcabamentoPeca" value="${draft.tempoAcabamentoPeca}"></div>
+            <div class="field"><label>Montagem (h)</label><input type="number" min="0" step="0.1" data-p="tempoMontagemPeca" value="${draft.tempoMontagemPeca}"></div>
+            <div class="field"><label>Embalagem (h)</label><input type="number" min="0" step="0.1" data-p="tempoEmbalagemPeca" value="${draft.tempoEmbalagemPeca}"></div>
+            <div class="field"><label>Outros trabalhos unitários (h)</label><input type="number" min="0" step="0.1" data-p="outrosTemposPeca" value="${draft.outrosTemposPeca}"></div>
+          </div></div>
+        <div class="card"><h2>Acabamento — materiais extras</h2><div class="grid">
+            <div class="field"><label>Valor (R$)</label><input type="number" min="0" step="0.01" data-p="acabamentoExtraValor" value="${draft.acabamentoExtraValor}"></div>
+            <div class="field"><label>Cobrança</label><select data-p="acabamentoExtraModo">
+                <option value="peca" ${draft.acabamentoExtraModo==='peca'?'selected':''}>Por peça</option>
+                <option value="lote" ${draft.acabamentoExtraModo==='lote'?'selected':''}>Por lote (pedido inteiro)</option>
+              </select></div>
+          </div></div>
+        <div class="card"><h2>Serviços adicionais <span class="lock-tag">opcional</span></h2>
+          <p class="card-note">Modelagem, alteração de arquivo, projeto sob medida — cobrado à parte da produção física.</p><div class="grid">
+            <div class="field"><label>Modelagem 3D (h)</label><input type="number" min="0" step="0.1" data-p="modelagem3dHoras" value="${draft.modelagem3dHoras}"></div>
+            <div class="field"><label>Alteração de modelo (h)</label><input type="number" min="0" step="0.1" data-p="alteracaoModeloHoras" value="${draft.alteracaoModeloHoras}"></div>
+            <div class="field"><label>Projeto personalizado (h)</label><input type="number" min="0" step="0.1" data-p="projetoPersonalizadoHoras" value="${draft.projetoPersonalizadoHoras}"></div>
+            <div class="field"><label>Prototipagem/testes (h)</label><input type="number" min="0" step="0.1" data-p="prototipagemHoras" value="${draft.prototipagemHoras}"></div>
+            <div class="field"><label>Outros serviços (h)</label><input type="number" min="0" step="0.1" data-p="outrosServicosHoras" value="${draft.outrosServicosHoras}"></div>
+            <div class="field"><label>Materiais/serviços extras (R$)</label><input type="number" min="0" step="0.01" data-p="materiaisServicosExtras" value="${draft.materiaisServicosExtras}"></div>
           </div></div>
         <div style="display:flex; gap:10px;">
           <button class="btn" id="save-pedido">${editingPedidoId?'Salvar alterações':'Salvar orçamento'}</button>
           <button class="btn ghost" id="cancel-pedido">Cancelar</button>
         </div></div>
       <div><div class="card" style="position:sticky; top:20px;"><h2>Resultado <span class="lock-tag">calculado</span></h2>
+          ${precoInvalido ? `<div class="tag-note err">⚠️ Impostos + comissão + margem somam 100% ou mais em Configurações — nenhum preço pode ser calculado.</div>` : `
+          ${producaoAtiva ? `
+          <div class="breakdown" style="margin-bottom:14px;">
+            <div class="line" style="font-weight:700;"><span>PRODUÇÃO</span><span></span></div>
+            <div class="line"><span>${producaoCalc.quantidade} peças</span><span>${producaoCalc.pecasPorFornada} por fornada</span></div>
+            <div class="line"><span>Fornadas</span><span>${producaoCalc.fornadas}</span></div>
+            <div class="line"><span>Última fornada</span><span>${producaoCalc.ultimaFornada} peças</span></div>
+            <div class="line"><span>Tempo total de máquina</span><span>${r.tempoImpressaoTotal.toFixed(2)}h</span></div>
+            ${draft.usarAmsLite ? `<div class="line"><span>AMS Lite</span><span>${draft.quantidadeCores} cores</span></div>` : ''}
+          </div>` : ''}
           <div class="result-strip">
-            <div class="result-cell"><div class="k">CUSTO TOTAL DE PRODUÇÃO</div><div class="v">${fmtR(r.custoTotal)}</div></div>
-            <div class="result-cell hero"><div class="k">PREÇO RECOMENDADO</div><div class="v">${fmtR(r.precoRecomendado)}</div></div>
+            <div class="result-cell"><div class="k">CUSTO TOTAL REAL</div><div class="v">${fmtR(r.custoTotal)}</div></div>
+            <div class="result-cell hero"><div class="k">PREÇO RECOMENDADO</div><div class="v">${fmtR(r.recomendado.preco)}</div></div>
           </div>
           <div class="breakdown">
-            <div class="line"><span>Material (com perdas)</span><span>${fmtR(r.custoMaterialTotal)}</span></div>
+            <div class="line"><span>Material</span><span>${fmtR(r.custoMaterial)}</span></div>
+            <div class="line"><span>Perdas de material</span><span>${fmtR(r.perdaMaterial)}</span></div>
             <div class="line"><span>Energia</span><span>${fmtR(r.custoEnergia)}</span></div>
-            <div class="line"><span>Máquina</span><span>${fmtR(r.custoMaquina)}</span></div>
-            <div class="line"><span>Mão de obra</span><span>${fmtR(r.custoMaoObra)}</span></div>
-            <div class="line"><span>Acabamento extra</span><span>${fmtR(r.acabamentoExtra)}</span></div>
+            <div class="line"><span>Depreciação da máquina</span><span>${fmtR(r.custoDepreciacao)}</span></div>
+            <div class="line"><span>Manutenção da máquina</span><span>${fmtR(r.custoManutencao)}</span></div>
+            <div class="line"><span>Mão de obra (lote)</span><span>${fmtR(r.maoObraLote)}</span></div>
+            ${producaoAtiva ? `<div class="line"><span>Mão de obra (fornada)</span><span>${fmtR(r.maoObraFornada)}</span></div>` : ''}
+            <div class="line"><span>Mão de obra (peça)</span><span>${fmtR(r.maoObraPeca)}</span></div>
+            <div class="line"><span>Reserva para falhas/reimpressões</span><span>${fmtR(r.custoRisco)}</span></div>
+            <div class="line"><span>Acabamento (materiais)</span><span>${fmtR(r.acabamentoMaterial)}</span></div>
             <div class="line"><span>Embalagem</span><span>${fmtR(r.custoEmbalagem)}</span></div>
-            <div class="line"><span>Despesas indiretas</span><span>${fmtR(r.despesasIndiretas)}</span></div>
-            <div class="line"><span>Preço mínimo</span><span>${fmtR(r.precoMinimo)}</span></div>
-            <div class="line"><span>Lucro</span><span>${fmtR(r.lucroR)} (${fmtP(r.lucroPct)})</span></div>
-            <div class="line"><span>Preço promocional</span><span>${fmtR(r.precoPromo)}</span></div>
-            <div class="line"><span>Preço atacado</span><span>${fmtR(r.precoAtacado)}</span></div>
-            <div class="line"><span>Preço unitário</span><span>${fmtR(r.precoUnitario)}</span></div>
-          </div></div></div></div>`;
+            <div class="line"><span>Custos indiretos rateados</span><span>${fmtR(r.custosIndiretos)}</span></div>
+            <div class="line"><span>Serviços de projeto/modelagem</span><span>${fmtR(r.custoServicos)}</span></div>
+            <div class="line" style="font-weight:700; border-bottom:1px solid var(--ink);"><span>CUSTO TOTAL</span><span>${fmtR(r.custoTotal)}</span></div>
+            <div class="line"><span>Preço mínimo — sem margem</span><span>${fmtR(r.precoMinimo)}</span></div>
+            <div class="line"><span>Lucro líquido</span><span>${fmtR(r.recomendado.lucro)}</span></div>
+            <div class="line"><span>Margem líquida</span><span>${fmtP(r.recomendado.margemReal)}</span></div>
+            <div class="line"><span>Markup</span><span>${fmtP(r.recomendado.markup)}</span></div>
+          </div>
+          <div class="breakdown" style="margin-top:10px;">
+            <div class="line"><span>Preço promocional</span><span>${fmtR(r.promocional.preco)}</span></div>
+            <div class="line"><span>Margem promocional</span><span>${fmtP(r.promocional.margemReal)}</span></div>
+            ${alertaAbaixoMinimo(r.promocional)}
+            <div class="line" style="margin-top:6px;"><span>Preço atacado</span><span>${fmtR(r.atacado.preco)}</span></div>
+            <div class="line"><span>Margem atacado</span><span>${fmtP(r.atacado.margemReal)}</span></div>
+            ${alertaAbaixoMinimo(r.atacado)}
+            <div class="line" style="margin-top:6px; font-weight:700;"><span>Preço unitário</span><span>${fmtR(r.precoUnitario)}</span></div>
+          </div>
+          ${economia ? `
+          <div class="breakdown" style="margin-top:10px;">
+            <div class="line" style="font-weight:700;"><span>ECONOMIA DE PRODUÇÃO EM FORNADAS</span><span></span></div>
+            <div class="line"><span>Produção unitária (1 por fornada)</span><span>${fmtR(economia.custoUnitSem)}/peça</span></div>
+            <div class="line"><span>Produção em ${draft.pecasPorFornada} por fornada</span><span>${fmtR(economia.custoUnitCom)}/peça</span></div>
+            <div class="line" style="color:var(--ok); font-weight:700;"><span>Economia estimada</span><span>${fmtR(economia.economia)}/peça</span></div>
+          </div>` : ''}
+          `}
+        </div></div></div>`;
 }
 function viewListaPedidos(){
   const rows = [...state.pedidos].sort((a,b)=>b.numero-a.numero).map(p=>{ const r = calcPedido(p);
     return `<tr><td class="mono">#${p.numero}</td><td>${p.data}</td><td>${p.cliente}</td><td>${p.produto}</td>
       <td class="num">${p.quantidade}</td><td class="num mono">${fmtR(r.custoTotal)}</td>
-      <td class="num mono">${fmtR(r.precoRecomendado)}</td><td class="num mono" style="color:var(--ok)">${fmtR(r.lucroR)}</td>
+      <td class="num mono">${fmtR(r.recomendado.preco)}</td><td class="num mono" style="color:var(--ok)">${fmtR(r.recomendado.lucro)}</td>
       <td><span class="badge ${statusClass[p.status]||''}">${p.status}</span></td>
       <td class="row-actions"><button class="btn ghost small" data-edit-pedido="${p.id}">Editar</button>
         <button class="btn danger small" data-del-pedido="${p.id}">Excluir</button></td></tr>`; }).join('');
   return `<h1>Orçamentos</h1><p class="lead">Todos os pedidos salvos, com custo e preço já calculados.</p>
     <div class="card"><table><thead><tr><th>Nº</th><th>Data</th><th>Cliente</th><th>Produto</th><th>Qtd</th><th>Custo</th><th>Preço</th><th>Lucro</th><th>Status</th><th></th></tr></thead>
         <tbody>${rows || `<tr><td colspan="10"><div class="empty">Nenhum orçamento salvo ainda. Vá em "Novo orçamento".</div></td></tr>`}</tbody></table></div>`;
+}
+function viewTestes(){
+  const results = runSelfTests();
+  const allPass = results.every(r=>r.pass);
+  const rows = results.map(r=>`<tr><td>${r.name}</td><td style="font-size:12px;color:var(--ink-soft)">${r.detail}</td>
+    <td><span class="badge ${r.pass?'fin':'can'}">${r.pass?'PASSOU':'FALHOU'}</span></td></tr>`).join('');
+  return `<h1>Testes automáticos</h1><p class="lead">Verificações internas da lógica de precificação — rodam sempre que você abre esta aba.</p>
+    <div class="tag-note ${allPass?'info':'err'}">${allPass ? '✅ Todos os testes passaram.' : '⚠️ Um ou mais testes falharam — revise a lógica antes de confiar nos preços.'}</div>
+    <div class="card"><table><thead><tr><th>Teste</th><th>Detalhe</th><th>Resultado</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 function viewGithub(){
   const g = github;
@@ -553,16 +1230,19 @@ function viewGithub(){
 // ---------- events ----------
 function bindEvents(){
   document.querySelectorAll('#nav button').forEach(b=>{
-    b.onclick = ()=>{ tab=b.dataset.tab; if(tab==='novo' && !editingPedidoId) draft=null; render(); };
+    b.onclick = ()=>{ tab=b.dataset.tab; if(tab==='novo' && !editingPedidoId) draft=null; formErrors=[]; render(); };
   });
   document.querySelectorAll('[data-cfg]').forEach(el=>{
     el.onchange = ()=>{ state.config[el.dataset.cfg] = parseFloat(el.value)||0; queueSync(); render(); };
+  });
+  document.querySelectorAll('[data-cfgbool]').forEach(el=>{
+    el.onchange = ()=>{ state.config[el.dataset.cfgbool] = el.checked; queueSync(); render(); };
   });
   const addMat = document.getElementById('add-mat');
   if (addMat) addMat.onclick = ()=>{ state.materiais.push({ id:uid(), nome:'Novo material', marca:'', tipo:'', pesoRolo:1000, precoRolo:0 }); queueSync(); render(); };
   document.querySelectorAll('[data-mat]').forEach(el=>{
     el.onchange = ()=>{ const id = el.closest('tr').dataset.id; const m = state.materiais.find(x=>x.id===id); const k = el.dataset.mat;
-      m[k] = (k==='pesoRolo'||k==='precoRolo') ? (parseFloat(el.value)||0) : el.value; queueSync(); render(); };
+      m[k] = (k==='pesoRolo'||k==='precoRolo') ? Math.max(0,parseFloat(el.value)||0) : el.value; queueSync(); render(); };
   });
   document.querySelectorAll('[data-del-mat]').forEach(el=>{
     el.onclick = ()=>{ state.materiais = state.materiais.filter(m=>m.id!==el.dataset.delMat); queueSync(); render(); };
@@ -571,26 +1251,32 @@ function bindEvents(){
   if (addImp) addImp.onclick = ()=>{ state.impressoras.push({ id:uid(), nome:'Nova impressora', modelo:'', valorAquisicao:0, vidaUtil:8000, potencia:120, manutencaoMensal:0, horasMes:150 }); queueSync(); render(); };
   document.querySelectorAll('[data-imp]').forEach(el=>{
     el.onchange = ()=>{ const id = el.closest('tr').dataset.id; const i = state.impressoras.find(x=>x.id===id); const k = el.dataset.imp;
-      i[k] = (k==='nome'||k==='modelo') ? el.value : (parseFloat(el.value)||0); queueSync(); render(); };
+      i[k] = (k==='nome'||k==='modelo') ? el.value : Math.max(0,parseFloat(el.value)||0); queueSync(); render(); };
   });
   document.querySelectorAll('[data-del-imp]').forEach(el=>{
     el.onclick = ()=>{ state.impressoras = state.impressoras.filter(i=>i.id!==el.dataset.delImp); queueSync(); render(); };
   });
   document.querySelectorAll('[data-p]').forEach(el=>{
     el.onchange = ()=>{ const k = el.dataset.p;
-      const numericKeys = ['quantidade','peso','tempoImpressao','tempoPreparacao','tempoAcabamento','tempoMontagem','tempoEmbalagem','outrosTempos','acabamentoExtra'];
-      draft[k] = numericKeys.includes(k) ? (parseFloat(el.value)||0) : el.value; render(); };
+      const textKeys = ['data','cliente','produto','status','materialId','impressoraId','acabamentoExtraModo','modoTempoAms'];
+      draft[k] = textKeys.includes(k) ? el.value : Math.max(0, parseFloat(el.value)||0);
+      render(); };
+  });
+  document.querySelectorAll('[data-p-bool]').forEach(el=>{
+    el.onchange = ()=>{ draft[el.dataset.pBool] = el.checked; render(); };
   });
   const saveBtn = document.getElementById('save-pedido');
   if (saveBtn) saveBtn.onclick = ()=>{
+    formErrors = validatePedidoForSave(draft, state.config);
+    if (formErrors.length){ render(); return; }
     if (editingPedidoId){ const idx = state.pedidos.findIndex(p=>p.id===editingPedidoId); state.pedidos[idx] = { ...draft, id: editingPedidoId }; }
     else { state.pedidos.push({ ...draft, id: uid() }); }
-    queueSync(); editingPedidoId = null; draft = null; tab='lista'; render();
+    queueSync(); editingPedidoId = null; draft = null; formErrors = []; tab='lista'; render();
   };
   const cancelBtn = document.getElementById('cancel-pedido');
-  if (cancelBtn) cancelBtn.onclick = ()=>{ editingPedidoId=null; draft=null; tab='lista'; render(); };
+  if (cancelBtn) cancelBtn.onclick = ()=>{ editingPedidoId=null; draft=null; formErrors=[]; tab='lista'; render(); };
   document.querySelectorAll('[data-edit-pedido]').forEach(el=>{
-    el.onclick = ()=>{ editingPedidoId = el.dataset.editPedido; draft = null; tab='novo'; render(); };
+    el.onclick = ()=>{ editingPedidoId = el.dataset.editPedido; draft = null; formErrors=[]; tab='novo'; render(); };
   });
   document.querySelectorAll('[data-del-pedido]').forEach(el=>{
     el.onclick = ()=>{ state.pedidos = state.pedidos.filter(p=>p.id!==el.dataset.delPedido); queueSync(); render(); };
@@ -603,7 +1289,16 @@ function bindEvents(){
     github.path = document.getElementById('gh-path').value.trim() || 'data.json';
     github.token = document.getElementById('gh-token').value.trim();
     saveSettings();
-    await ghFetch();
+    // Nunca sobrescreve o estado local aqui: só obtém o SHA remoto (se existir) e
+    // então grava o estado local atual. O estado local nunca é descartado.
+    setSync('busy','Conectando ao GitHub…');
+    try{
+      ghSha = await ghGetLatestSha();
+    } catch(e){
+      setSync('err', 'Falha ao conectar ao GitHub: ' + e.message);
+      render();
+      return;
+    }
     await ghPush(false);
     render();
   };
@@ -622,6 +1317,7 @@ function bindEvents(){
 }
 
 init();
+
 </script>
 </body>
 </html>
