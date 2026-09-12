@@ -313,9 +313,28 @@ function migratePedido(p){
 // ---------- github settings (local only, never synced) ----------
 function loadSettings(){
   try{ const raw = localStorage.getItem(LS_SETTINGS_KEY); if (raw) github = { ...github, ...JSON.parse(raw) }; } catch(e){}
+  // Link de configuração rápida: só owner/repo/branch/path vêm pela URL (nunca o token — por
+  // segurança, o token precisa sempre ser digitado/colado manualmente em cada dispositivo).
+  try{
+    const params = new URLSearchParams(window.location.search);
+    let veioDaUrl = false;
+    ['owner','repo','branch','path'].forEach(k=>{
+      if (params.has(k) && params.get(k)){ github[k] = params.get(k); veioDaUrl = true; }
+    });
+    if (veioDaUrl) saveSettings();
+  } catch(e){}
 }
 function saveSettings(){ localStorage.setItem(LS_SETTINGS_KEY, JSON.stringify(github)); }
 function githubConfigured(){ return !!(github.owner && github.repo && github.token); }
+function linkConfiguracaoRapida(){
+  const url = new URL(window.location.href);
+  url.search = '';
+  url.searchParams.set('owner', github.owner||'');
+  url.searchParams.set('repo', github.repo||'');
+  url.searchParams.set('branch', github.branch||'main');
+  url.searchParams.set('path', github.path||'data.json');
+  return url.toString();
+}
 
 // ---------- base64 (unicode-safe) ----------
 function b64Encode(str){
@@ -1454,6 +1473,14 @@ function viewGithub(){
         <button class="btn ghost" id="gh-test">Testar conexão</button>
       </div>
     </div>
+    <div class="card"><h2>Configurar um novo dispositivo mais rápido</h2>
+      <p class="card-note">Copie este link e abra em qualquer outro celular/computador — ele já vem com usuário, repositório, branch e caminho preenchidos. Você só precisa colar o token (guarde-o num gerenciador de senhas para colar rapidinho). O token nunca entra no link, por segurança.</p>
+      ${(g.owner && g.repo) ? `
+      <div style="display:flex; gap:10px; align-items:center;">
+        <input id="gh-quicklink" value="${linkConfiguracaoRapida()}" readonly style="flex:1; font-family:var(--mono); font-size:12px;">
+        <button class="btn ghost" id="gh-copy-link" style="flex-shrink:0;">Copiar link</button>
+      </div>` : `<div class="tag-note" style="margin-bottom:0;">Preencha e salve o repositório acima primeiro para gerar o link.</div>`}
+    </div>
     <div class="card"><h2>Como publicar (2 repositórios, tudo grátis)</h2>
       <ol class="steps">
         <li><strong>Repositório 1 — público, só o site:</strong> crie um repositório (ex: <code>028labs-calculadora</code>), suba este <code>index.html</code> via "Add file → Upload files". Ele não vai conter nenhum dado seu, só o código do app.</li>
@@ -1613,6 +1640,17 @@ function bindEvents(){
       if (!res.ok) throw new Error(`Resposta ${res.status}`);
       setSync('ok','Conexão OK — repositório encontrado.');
     } catch(e){ setSync('err','Erro: ' + e.message); }
+  };
+  const ghCopyLink = document.getElementById('gh-copy-link');
+  if (ghCopyLink) ghCopyLink.onclick = async ()=>{
+    const link = document.getElementById('gh-quicklink').value;
+    try{
+      await navigator.clipboard.writeText(link);
+      ghCopyLink.textContent = 'Copiado!';
+      setTimeout(()=>{ ghCopyLink.textContent = 'Copiar link'; }, 1500);
+    } catch(e){
+      document.getElementById('gh-quicklink').select();
+    }
   };
 }
 
