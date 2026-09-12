@@ -53,6 +53,9 @@
   .lead{color:var(--ink-soft); font-size:14px; margin:0 0 28px;}
   .card{background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:22px 24px; margin-bottom:20px;}
   .card h2{font-size:15px; margin:0 0 4px; font-weight:700;}
+  .card summary::-webkit-details-marker{display:none;}
+  .card summary::marker{content:'';}
+  details.card[open] summary{border-bottom:1px solid var(--line); margin-bottom:0;}
   .card .card-note{font-size:12.5px; color:var(--ink-soft); margin:0 0 18px;}
   .grid{display:grid; grid-template-columns:repeat(auto-fill, minmax(230px,1fr)); gap:14px;}
   label{display:block; font-size:12px; color:var(--ink-soft); margin-bottom:5px; font-weight:600;}
@@ -230,10 +233,8 @@ const DEFAULT_CONFIG = {
   percMargem: 0.30,
   percComissao: 0, // fica zerado por padrão pois depende do canal de venda (marketplace, cartão, intermediário etc.)
 
-  // Embalagem e consumíveis — total de referência R$6,30/peça para uma operação simples
-  custoEmbalagem: 4,
-  custoEtiqueta: 0.80,
-  custoConsumiveis: 1.50,
+  // Embalagens são cadastradas e escolhidas por item no próprio orçamento (aba Embalagens) — não há
+  // mais um valor fixo aqui, para não somar em dobro com os itens escolhidos.
 
   // Descontos comerciais
   descPromocional: 0.10,
@@ -265,7 +266,7 @@ function migrateConfig(raw){
 function migratePedido(p){
   return {
     id: p.id, numero: p.numero, data: p.data, cliente: p.cliente||'', produto: p.produto||'',
-    quantidade: p.quantidade||0, materialId: p.materialId||'', peso: p.peso||0,
+    quantidade: p.quantidade||0, materialId: p.materialId||'', peso: p.peso||0, pesoModo: p.pesoModo ?? 'peca',
     impressoraId: p.impressoraId||'', tempoImpressao: p.tempoImpressao||0,
     // tempos por LOTE (não multiplicam pela quantidade)
     tempoPreparacaoLote: p.tempoPreparacaoLote ?? p.tempoPreparacao ?? 0,
@@ -556,13 +557,24 @@ function calcPedidoCore(p, cfg, mat, imp, embalagensCat, adicionaisCat){
   embalagensCat = embalagensCat || [];
   adicionaisCat = adicionaisCat || [];
   const qtd = Math.max(0, p.quantidade||0);
-  const pesoTotal = Math.max(0, p.peso||0) * qtd; // material sempre por PEÇA — fornadas não alteram isso
+
+  // ---- produção em fornadas: calculada primeiro, pois peso e tempo de impressão dependem dela ----
+  const producao = calcularFornadas(p);
+
+  // ---- peso: por PEÇA ou da FORNADA INTEIRA — escolhido explicitamente por `pesoModo`, independente ----
+  // do checkbox de produção em fornadas. O Bambu Studio mostra o peso total da chapa quando várias
+  // peças são impressas juntas, então às vezes você só tem esse número mesmo sem usar o modo fornada
+  // aqui. O material total nunca muda por causa da estratégia de impressão: mesmas peças, mesmo peso
+  // total. Quando fornadas está desligado, `producao.fornadas` já vale a própria quantidade, então
+  // "fornada" e "peça" dão o mesmo resultado nesse caso — sem risco de inconsistência.
+  const pesoTotal = (p.pesoModo === 'fornada')
+    ? Math.max(0, p.peso||0) * producao.fornadas
+    : Math.max(0, p.peso||0) * qtd;
 
   // ---- tempo de impressão: por PEÇA (fornadas desligadas) ou por FORNADA (fornadas ligadas) ----
   // Campo `tempoImpressao` é reinterpretado conforme `producaoPorFornada`, sem renomear/quebrar dados antigos:
   //   producaoPorFornada = false (padrão dos pedidos antigos) -> tempoImpressao = tempo de UMA peça
   //   producaoPorFornada = true  -> tempoImpressao = tempo de UMA fornada (várias peças juntas na mesa)
-  const producao = calcularFornadas(p);
   const tempoAmsFornada = calcularTempoAmsFornada(p);
   const tempoPorFornadaEfetivo = Math.max(0, p.tempoImpressao||0) + tempoAmsFornada;
   const tempoImpressaoTotal = (p.producaoPorFornada && qtd > 1)
@@ -608,12 +620,7 @@ function calcPedidoCore(p, cfg, mat, imp, embalagensCat, adicionaisCat){
   const acabamentoMaterial = (p.acabamentoExtraModo === 'lote')
     ? (p.acabamentoExtraValor||0)
     : (p.acabamentoExtraValor||0) * qtd;
-  const custoEmbalagemUnit = (cfg.custoEmbalagem||0) + (cfg.custoEtiqueta||0) + (cfg.custoConsumiveis||0);
-  const custoEmbalagem = custoEmbalagemUnit * qtd;
-
-  // Embalagens escolhidas do catálogo (itens específicos, com quantidade própria por item) — somam-se
-  // ao custo de embalagem padrão acima, sem substituí-lo. Se preferir usar só o catálogo, zere os
-  // valores de embalagem/etiqueta/consumíveis em Configurações.
+  // Embalagens escolhidas do catálogo (itens específicos, cada um com sua própria quantidade neste pedido).
   const custoEmbalagensItens = (p.embalagensItens||[]).reduce((soma, it) => {
     const e = embalagensCat.find(x => x.id === it.embalagemId);
     return soma + (e ? e.valor * Math.max(0, it.quantidade||0) : 0);
@@ -639,7 +646,7 @@ function calcPedidoCore(p, cfg, mat, imp, embalagensCat, adicionaisCat){
   const custosIndiretos = horasProdutivas * (cfg.custosIndiretosHora||0);
 
   // ---- custo total real ----
-  const custoTotal = custoProdutivoAposRisco + acabamentoMaterial + custoEmbalagem + custoEmbalagensItens
+  const custoTotal = custoProdutivoAposRisco + acabamentoMaterial + custoEmbalagensItens
     + custosIndiretos + custoServicos + custoAdicionaisItens;
 
   const pricing = computePricing(custoTotal, cfg);
@@ -651,7 +658,7 @@ function calcPedidoCore(p, cfg, mat, imp, embalagensCat, adicionaisCat){
     custoEnergia, custoDepreciacao, custoManutencao, custoMaquina,
     maoObraLote, maoObraFornada, maoObraPeca, maoObraTotal,
     custoProdutivoAntesRisco, custoRisco, custoProdutivoAposRisco,
-    acabamentoMaterial, custoEmbalagem, custoEmbalagensItens, custoAdicionaisItens, custoServicos, custosIndiretos,
+    acabamentoMaterial, custoEmbalagensItens, custoAdicionaisItens, custoServicos, custosIndiretos,
     custoTotal, precoUnitario,
     ...pricing
   };
@@ -670,9 +677,15 @@ function calcPedido(p){
 function calcEconomiaFornada(p, cfg, mat, imp, embalagensCat, adicionaisCat){
   if (!p.producaoPorFornada || !(p.quantidade > 1) || !(p.tempoImpressao > 0)) return null;
   const comFornada = calcPedidoCore(p, cfg, mat, imp, embalagensCat, adicionaisCat);
-  const semFornada = calcPedidoCore({ ...p, producaoPorFornada:false }, cfg, mat, imp, embalagensCat, adicionaisCat);
-  if (!(comFornada.qtd > 0) || !(semFornada.qtd > 0)) return null;
-  if (comFornada.producao.fornadas >= semFornada.qtd) return null; // sem lote real, nada a comparar
+  if (!(comFornada.qtd > 0)) return null;
+  if (comFornada.producao.fornadas >= comFornada.qtd) return null; // sem lote real, nada a comparar
+  // O peso informado é o peso da FORNADA inteira (não de uma peça). Para comparar com o cenário
+  // "sem fornada" sem inventar material que não existe, convertemos para peso-por-peça equivalente
+  // a partir do peso total já calculado corretamente acima — assim o material bate igual nos dois
+  // cenários (o total de matéria-prima não muda por causa da estratégia de impressão).
+  const pesoPorPecaEquivalente = comFornada.pesoTotal / comFornada.qtd;
+  const semFornada = calcPedidoCore({ ...p, producaoPorFornada:false, pesoModo:'peca', peso: pesoPorPecaEquivalente }, cfg, mat, imp, embalagensCat, adicionaisCat);
+  if (!(semFornada.qtd > 0)) return null;
   const custoUnitCom = comFornada.custoTotal / comFornada.qtd;
   const custoUnitSem = semFornada.custoTotal / semFornada.qtd;
   return { custoUnitSem, custoUnitCom, economia: custoUnitSem - custoUnitCom };
@@ -681,7 +694,7 @@ function calcEconomiaFornada(p, cfg, mat, imp, embalagensCat, adicionaisCat){
 function validatePedidoForSave(p, cfg){
   const errs = [];
   if (!(p.quantidade > 0)) errs.push('Informe uma quantidade maior que zero.');
-  if (!(p.peso > 0)) errs.push('Informe um peso por peça maior que zero.');
+  if (!(p.peso > 0)) errs.push(p.pesoModo === 'fornada' ? 'Informe o peso da fornada (peso de todas as peças da mesa).' : 'Informe um peso por peça maior que zero.');
   if (p.producaoPorFornada){
     if (!(p.tempoImpressao > 0)) errs.push('Informe o tempo de impressão da fornada.');
     if (!(p.pecasPorFornada >= 1)) errs.push('Peças por fornada deve ser pelo menos 1.');
@@ -712,7 +725,7 @@ function validatePedidoForSave(p, cfg){
 function pedidoWarnings(p){
   const warns = [];
   if (p.quantidade > 0){
-    if (!(p.peso > 0)) warns.push('Peso por peça está zerado — o custo de material não está sendo considerado.');
+    if (!(p.peso > 0)) warns.push(p.pesoModo === 'fornada' ? 'Peso da fornada está zerado — o custo de material não está sendo considerado.' : 'Peso por peça está zerado — o custo de material não está sendo considerado.');
     if (p.producaoPorFornada){
       if (!(p.tempoImpressao > 0)) warns.push('Tempo de impressão por fornada está zerado — energia e custo de máquina não estão sendo considerados.');
     } else {
@@ -734,7 +747,7 @@ function pedidoWarnings(p){
 // ==================================================================
 function pedidoTeste(overrides){
   return {
-    quantidade:1, materialId:'', peso:0, impressoraId:'', tempoImpressao:0,
+    quantidade:1, materialId:'', peso:0, pesoModo:'peca', impressoraId:'', tempoImpressao:0,
     tempoPreparacaoLote:0, tempoConfiguracaoLote:0, tempoPreparacaoMaquinaLote:0, outrosTemposLote:0,
     tempoAcabamentoPeca:0, tempoMontagemPeca:0, tempoEmbalagemPeca:0, outrosTemposPeca:0,
     acabamentoExtraValor:0, acabamentoExtraModo:'peca',
@@ -801,8 +814,7 @@ function runSelfTests(){
 
   // Teste 7 — taxa de falha/reimpressão
   {
-    const cfg = { ...DEFAULT_CONFIG, percFalha:0.05, percPerdas:0, maoObraHora:0, custosIndiretosHora:0,
-      custoEmbalagem:0, custoEtiqueta:0, custoConsumiveis:0 };
+    const cfg = { ...DEFAULT_CONFIG, percFalha:0.05, percPerdas:0, maoObraHora:0, custosIndiretosHora:0 };
     const mat = { pesoRolo:1000, precoRolo:100 }; // preço/g = 0.10
     // 1000g * 0.10 = R$100 de material, sem perdas/energia/máquina/mão de obra
     const p = pedidoTeste({ quantidade:1, peso:1000, materialId:'m' });
@@ -850,13 +862,13 @@ function runSelfTests(){
       `fornadas = ${r.fornadas} (esperado 5), última fornada = ${r.ultimaFornada} peças (esperado 3)`);
   }
 
-  // Teste 12 — material não muda com fornadas (continua por PEÇA)
+  // Teste 12 — peso por PEÇA (sem fornadas) continua multiplicando pela quantidade normalmente
   {
     const cfg = { ...DEFAULT_CONFIG, percPerdas:0 };
     const mat = { pesoRolo:1000, precoRolo:0 };
-    const p = pedidoTeste({ quantidade:20, peso:100, producaoPorFornada:true, pecasPorFornada:5, tempoImpressao:1 });
+    const p = pedidoTeste({ quantidade:20, peso:100, producaoPorFornada:false, tempoImpressao:1 });
     const r = calcPedidoCore(p, cfg, mat, null);
-    push('Teste 12 — Material continua por peça mesmo com fornadas (20×100g)',
+    push('Teste 12 — Peso por peça (100g) × 20 peças sem fornadas',
       Math.abs(r.pesoTotal - 2000) < 0.001,
       `pesoTotal = ${r.pesoTotal.toFixed(0)}g (esperado 2000g)`);
   }
@@ -916,6 +928,37 @@ function runSelfTests(){
     push('Teste 18 — Quantidade de cores da AMS (1–4 válido, 5 inválido)',
       amsCoresValidas(4) === true && amsCoresValidas(5) === false && amsCoresValidas(1) === true && amsCoresValidas(0) === false,
       `cores=4 → ${amsCoresValidas(4)} (esperado true); cores=5 → ${amsCoresValidas(5)} (esperado false)`);
+  }
+
+  // Teste 19 — peso da FORNADA (peso da chapa inteira, como o Bambu Studio mostra) não multiplica por peça
+  {
+    const cfg = { ...DEFAULT_CONFIG };
+    const mat = { pesoRolo:1000, precoRolo:100 }; // preço/g = 0.10
+    // 20 peças, 5 por fornada (4 fornadas), peso da chapa (5 peças juntas) = 100g -> total real = 400g
+    const p = pedidoTeste({ quantidade:20, producaoPorFornada:true, pecasPorFornada:5, tempoImpressao:1, peso:100, pesoModo:'fornada' });
+    const r = calcPedidoCore(p, cfg, mat, null);
+    push('Teste 19 — Peso da fornada (100g de 5 peças) × 4 fornadas = 400g, não 100g×20=2000g',
+      Math.abs(r.pesoTotal - 400) < 0.01,
+      `pesoTotal = ${r.pesoTotal.toFixed(0)}g (esperado 400g, NUNCA 2000g)`);
+  }
+
+  // Teste 20 — "Esse peso é de" funciona de forma independente do checkbox de fornadas
+  {
+    const cfg = { ...DEFAULT_CONFIG };
+    const mat = { pesoRolo:1000, precoRolo:100 };
+    // Fornadas LIGADAS mas peso escolhido como "uma peça": material não deve considerar o número de fornadas
+    const p1 = pedidoTeste({ quantidade:20, producaoPorFornada:true, pecasPorFornada:5, tempoImpressao:1, peso:20, pesoModo:'peca' });
+    const r1 = calcPedidoCore(p1, cfg, mat, null);
+    push('Teste 20a — Fornadas ligadas + peso "de uma peça" = peso × quantidade (20×20g=400g)',
+      Math.abs(r1.pesoTotal - 400) < 0.01,
+      `pesoTotal = ${r1.pesoTotal.toFixed(0)}g (esperado 400g)`);
+    // Fornadas DESLIGADAS mas peso escolhido como "a fornada inteira": sem fornada real, cada peça é sua
+    // própria fornada, então o resultado é igual ao modo "peça" (sem inconsistência).
+    const p2 = pedidoTeste({ quantidade:20, producaoPorFornada:false, tempoImpressao:1, peso:20, pesoModo:'fornada' });
+    const r2 = calcPedidoCore(p2, cfg, mat, null);
+    push('Teste 20b — Fornadas desligadas + peso "da fornada": cada peça é sua fornada, resultado igual (400g)',
+      Math.abs(r2.pesoTotal - 400) < 0.01,
+      `pesoTotal = ${r2.pesoTotal.toFixed(0)}g (esperado 400g)`);
   }
 
   return out;
@@ -999,11 +1042,8 @@ function viewConfig(){
         ${fieldNum('maoObraHora', c.maoObraHora, 'Mão de obra produtiva (R$/h)')}
         ${fieldNum('tarifaProjetoHora', c.tarifaProjetoHora, 'Tarifa de projeto/modelagem (R$/h)')}
         ${fieldNum('custosIndiretosHora', c.custosIndiretosHora, 'Custos indiretos / overhead (R$/hora produtiva)')}
-        ${fieldNum('custoEmbalagem', c.custoEmbalagem, 'Embalagem por peça (R$)')}
-        ${fieldNum('custoEtiqueta', c.custoEtiqueta, 'Etiqueta por peça (R$)')}
-        ${fieldNum('custoConsumiveis', c.custoConsumiveis, 'Outros consumíveis por peça (R$)')}
       </div>
-      <p class="card-note" style="margin-top:10px;">"Custos indiretos / overhead" é o rateio de despesas administrativas/estruturais (aluguel, internet, software etc.) — não é depreciação nem custo direto da máquina, que já são calculados separadamente.</p>
+      <p class="card-note" style="margin-top:10px;">"Custos indiretos / overhead" é o rateio de despesas administrativas/estruturais (aluguel, internet, software etc.) — não é depreciação nem custo direto da máquina, que já são calculados separadamente. Embalagens agora são cadastradas e escolhidas por item na aba "Embalagens" de cada orçamento, não aqui.</p>
       </div>
     <div class="card"><h2>Perdas, risco, impostos e margem</h2>
       <p class="card-note">"Reserva para falhas/reimpressões" não é uma previsão de que essa % das peças vai falhar — é uma reserva de custo incorporada ao preço para cobrir o risco médio de ter que refazer uma impressão.</p>
@@ -1081,7 +1121,7 @@ function viewAdicionais(){
 }
 function emptyPedido(){
   return { id:null, numero: nextNumero(), data: new Date().toISOString().slice(0,10), cliente:'', produto:'',
-    quantidade:0, materialId: state.materiais[0]?.id||'', peso:0, impressoraId: state.impressoras[0]?.id||'',
+    quantidade:0, materialId: state.materiais[0]?.id||'', peso:0, pesoModo:'peca', impressoraId: state.impressoras[0]?.id||'',
     tempoImpressao:0,
     tempoPreparacaoLote:0, tempoConfiguracaoLote:0, tempoPreparacaoMaquinaLote:0, outrosTemposLote:0,
     tempoAcabamentoPeca:0, tempoMontagemPeca:0, tempoEmbalagemPeca:0, outrosTemposPeca:0,
@@ -1119,6 +1159,17 @@ function viewNovoPedido(){
   const tempoDesc = producaoAtiva
     ? 'Tempo necessário para imprimir todas as peças colocadas simultaneamente na mesa. Use o tempo real informado pelo Bambu Studio.'
     : 'Tempo necessário para imprimir uma única unidade.';
+  const pesoLabel = draft.pesoModo === 'fornada' ? 'Peso da fornada (g)' : 'Peso por peça (g)';
+  const pesoDesc = draft.pesoModo === 'fornada'
+    ? 'Peso total de todas as peças da mesa (o valor que o Bambu Studio mostra para a chapa inteira, não de uma peça isolada).'
+    : 'Peso de uma única unidade.';
+  const temDetalhesAvancados = draft.usarAmsLite
+    || draft.tempoPreparacaoLote>0 || draft.tempoConfiguracaoLote>0 || draft.tempoPreparacaoMaquinaLote>0 || draft.outrosTemposLote>0
+    || draft.tempoPreparacaoFornada>0 || draft.tempoRetiradaFornada>0 || draft.outrosTemposFornada>0
+    || draft.tempoAcabamentoPeca>0 || draft.tempoMontagemPeca>0 || draft.tempoEmbalagemPeca>0 || draft.outrosTemposPeca>0
+    || draft.acabamentoExtraValor>0
+    || draft.modelagem3dHoras>0 || draft.alteracaoModeloHoras>0 || draft.projetoPersonalizadoHoras>0 || draft.prototipagemHoras>0
+    || draft.outrosServicosHoras>0 || draft.materiaisServicosExtras>0;
 
   return `<h1>${editingPedidoId?'Editar':'Novo'} orçamento</h1><p class="lead">Preencha os dados da peça — o custo e o preço são calculados na hora.</p>
     ${noRes ? `<div class="tag-note">Cadastre ao menos 1 material e 1 impressora antes de gerar um orçamento.</div>` : ''}
@@ -1135,11 +1186,15 @@ function viewNovoPedido(){
           </div></div>
         <div class="card"><h2>Material e impressão</h2><div class="grid">
             <div class="field"><label>Material</label><select data-p="materialId">${matOpts}</select></div>
-            <div class="field"><label>Peso por peça (g)</label><input type="number" min="0" step="1" data-p="peso" value="${draft.peso}"></div>
+            <div class="field"><label>${pesoLabel}</label><input type="number" min="0" step="1" data-p="peso" value="${draft.peso}"></div>
+            <div class="field"><label>Esse peso é de</label><select data-p="pesoModo">
+                <option value="peca" ${draft.pesoModo!=='fornada'?'selected':''}>Uma peça</option>
+                <option value="fornada" ${draft.pesoModo==='fornada'?'selected':''}>A fornada inteira (mesa)</option>
+              </select></div>
             <div class="field"><label>Impressora</label><select data-p="impressoraId">${impOpts}</select></div>
             ${fieldDHM("tempoImpressao", tempoLabel)}
           </div>
-          <p class="card-note" style="margin-top:10px;">${tempoDesc}</p></div>
+          <p class="card-note" style="margin-top:10px;">${pesoDesc} ${tempoDesc} O peso pode ser "de uma peça" ou "da fornada inteira" independentemente de você estar usando produção em fornadas — é só o número que você tem em mãos.</p></div>
         ${mostraFornadas ? `
         <div class="card"><h2>Produção em fornadas</h2>
           <p class="card-note">Produção em fornadas permite colocar várias unidades iguais na mesa ao mesmo tempo. O custo de máquina é calculado pelo número de fornadas e pelo tempo real de impressão, enquanto material, acabamento, montagem e embalagem continuam sendo calculados por peça.</p>
@@ -1154,65 +1209,6 @@ function viewNovoPedido(){
             <div class="field locked"><label>Última fornada <span class="lock-tag">calc</span></label><input value="${producaoCalc.ultimaFornada} peças" disabled></div>
           </div>` : ''}
         </div>` : ''}
-        <div class="card"><h2>AMS Lite / impressão multicolorida <span class="lock-tag">opcional</span></h2>
-          <p class="card-note">O AMS Lite permite impressão multicolorida, mas as trocas de filamento podem aumentar bastante o tempo de impressão. Para precificação precisa, informe o tempo real mostrado pelo Bambu Studio.</p>
-          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:${draft.usarAmsLite?'14px':'0'};">
-            <input type="checkbox" data-p-bool="usarAmsLite" ${draft.usarAmsLite?'checked':''} style="width:auto;">
-            Usar AMS Lite
-          </label>
-          ${draft.usarAmsLite ? `
-          <div class="grid">
-            <div class="field"><label>Quantidade de cores (1–4)</label><input type="number" min="1" max="4" step="1" data-p="quantidadeCores" value="${draft.quantidadeCores}"></div>
-            <div class="field"><label>Modo de tempo</label><select data-p="modoTempoAms">
-                <option value="total" ${draft.modoTempoAms==='total'?'selected':''}>Informar tempo TOTAL (já com AMS)</option>
-                <option value="base" ${draft.modoTempoAms==='base'?'selected':''}>Informar tempo BASE + adicional AMS</option>
-              </select></div>
-          </div>
-          ${draft.modoTempoAms==='base' ? `
-          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:12px 0;">
-            <input type="checkbox" data-p-bool="estimarAmsPorTrocas" ${draft.estimarAmsPorTrocas?'checked':''} style="width:auto;">
-            Estimar tempo AMS por número de trocas de filamento
-          </label>
-          <div class="grid">
-            ${draft.estimarAmsPorTrocas ? `
-            <div class="field"><label>Número de trocas na fornada</label><input type="number" min="0" step="1" data-p="numTrocasFornada" value="${draft.numTrocasFornada}"></div>
-            <div class="field"><label>Tempo médio por troca (segundos)</label><input type="number" min="0" step="1" data-p="segundosPorTroca" value="${draft.segundosPorTroca}"></div>
-            <div class="field locked"><label>Tempo AMS estimado (h) <span class="lock-tag">calc</span></label><input value="${calcularTempoAmsFornada(draft).toFixed(2)}" disabled></div>
-            ` : `
-            ${fieldDHM("tempoAdicionalAmsFornada", "Tempo adicional AMS")}
-            `}
-          </div>` : ''}
-          <p class="card-note" style="margin-top:10px;">Cores utilizadas: ${draft.quantidadeCores}${draft.quantidadeCores>1 ? ' — ⚠️ mais cores podem aumentar o tempo de impressão devido às trocas de filamento.' : ''}</p>
-          ` : ''}
-        </div>
-        <div class="card"><h2>Tempos por LOTE <span class="lock-tag">não multiplica pela quantidade nem por fornadas</span></h2>
-          <p class="card-note">Trabalho feito uma única vez para o pedido inteiro, independente de quantas peças ou fornadas.</p><div class="grid">
-            ${fieldDHM("tempoPreparacaoLote", "Preparação")}
-            ${fieldDHM("tempoConfiguracaoLote", "Configuração")}
-            ${fieldDHM("tempoPreparacaoMaquinaLote", "Preparação da máquina")}
-            ${fieldDHM("outrosTemposLote", "Outros trabalhos gerais")}
-          </div></div>
-        ${producaoAtiva ? `
-        <div class="card"><h2>Tempos por FORNADA <span class="lock-tag">multiplica pelo número de fornadas</span></h2>
-          <p class="card-note">Trabalho que precisa ser repetido a cada nova fornada (ex.: trocar a mesa, retirar as peças).</p><div class="grid">
-            ${fieldDHM("tempoPreparacaoFornada", "Preparação da fornada")}
-            ${fieldDHM("tempoRetiradaFornada", "Retirada/limpeza da mesa")}
-            ${fieldDHM("outrosTemposFornada", "Outros trabalhos por fornada")}
-          </div></div>` : ''}
-        <div class="card"><h2>Tempos por PEÇA <span class="lock-tag">multiplica pela quantidade</span></h2>
-          <p class="card-note">Trabalho repetido em cada unidade produzida.</p><div class="grid">
-            ${fieldDHM("tempoAcabamentoPeca", "Acabamento")}
-            ${fieldDHM("tempoMontagemPeca", "Montagem")}
-            ${fieldDHM("tempoEmbalagemPeca", "Embalagem")}
-            ${fieldDHM("outrosTemposPeca", "Outros trabalhos unitários")}
-          </div></div>
-        <div class="card"><h2>Acabamento — materiais extras</h2><div class="grid">
-            <div class="field"><label>Valor (R$)</label><input type="number" min="0" step="0.01" data-p="acabamentoExtraValor" value="${draft.acabamentoExtraValor}"></div>
-            <div class="field"><label>Cobrança</label><select data-p="acabamentoExtraModo">
-                <option value="peca" ${draft.acabamentoExtraModo==='peca'?'selected':''}>Por peça</option>
-                <option value="lote" ${draft.acabamentoExtraModo==='lote'?'selected':''}>Por lote (pedido inteiro)</option>
-              </select></div>
-          </div></div>
         <div class="card"><h2>Embalagens</h2>
           <p class="card-note">Escolha as embalagens usadas neste orçamento e a quantidade de cada uma.</p>
           ${state.embalagens.length ? `
@@ -1246,7 +1242,72 @@ function viewNovoPedido(){
                 <td class="num mono">${fmtR(sub)}</td><td><button class="btn danger small" data-del-adc-item="${it.lineId}">Remover</button></td></tr>`; }).join('')}
           </tbody></table>` : ''}
         </div>
-        <div class="card"><h2>Serviços adicionais <span class="lock-tag">opcional</span></h2>
+        <details class="card" ${temDetalhesAvancados ? 'open' : ''} style="padding:0;">
+          <summary style="cursor:pointer; padding:22px 24px; font-weight:700; font-size:15px; list-style:none;">
+            ▸ Mão de obra detalhada, AMS e serviços <span class="lock-tag" style="font-weight:600;">opcional — deixe fechado se o peso/tempo já vêm prontos do Bambu Studio</span>
+          </summary>
+          <div style="padding:0 24px 22px;">
+          <p class="card-note">Use esta seção só se precisar detalhar trabalho que o Bambu Studio não mostra: preparação manual, acabamento, montagem, embalagem separada por hora, impressão multicolorida em modo "base + adicional" ou serviços de projeto cobrados à parte. Se o peso e o tempo que você já preencheu acima já vêm prontos da fatia (como no Resultado do fatiamento do Bambu Studio), pode deixar tudo aqui zerado.</p>
+
+          <h2 style="margin-top:18px;">AMS Lite / impressão multicolorida</h2>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:${draft.usarAmsLite?'14px':'0'};">
+            <input type="checkbox" data-p-bool="usarAmsLite" ${draft.usarAmsLite?'checked':''} style="width:auto;">
+            Usar AMS Lite
+          </label>
+          ${draft.usarAmsLite ? `
+          <div class="grid">
+            <div class="field"><label>Quantidade de cores (1–4)</label><input type="number" min="1" max="4" step="1" data-p="quantidadeCores" value="${draft.quantidadeCores}"></div>
+            <div class="field"><label>Modo de tempo</label><select data-p="modoTempoAms">
+                <option value="total" ${draft.modoTempoAms==='total'?'selected':''}>Informar tempo TOTAL (já com AMS)</option>
+                <option value="base" ${draft.modoTempoAms==='base'?'selected':''}>Informar tempo BASE + adicional AMS</option>
+              </select></div>
+          </div>
+          ${draft.modoTempoAms==='base' ? `
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:12px 0;">
+            <input type="checkbox" data-p-bool="estimarAmsPorTrocas" ${draft.estimarAmsPorTrocas?'checked':''} style="width:auto;">
+            Estimar tempo AMS por número de trocas de filamento
+          </label>
+          <div class="grid">
+            ${draft.estimarAmsPorTrocas ? `
+            <div class="field"><label>Número de trocas na fornada</label><input type="number" min="0" step="1" data-p="numTrocasFornada" value="${draft.numTrocasFornada}"></div>
+            <div class="field"><label>Tempo médio por troca (segundos)</label><input type="number" min="0" step="1" data-p="segundosPorTroca" value="${draft.segundosPorTroca}"></div>
+            <div class="field locked"><label>Tempo AMS estimado (h) <span class="lock-tag">calc</span></label><input value="${calcularTempoAmsFornada(draft).toFixed(2)}" disabled></div>
+            ` : `
+            ${fieldDHM("tempoAdicionalAmsFornada", "Tempo adicional AMS")}
+            `}
+          </div>` : ''}
+          <p class="card-note" style="margin-top:10px;">Cores utilizadas: ${draft.quantidadeCores}${draft.quantidadeCores>1 ? ' — ⚠️ mais cores podem aumentar o tempo de impressão devido às trocas de filamento.' : ''}</p>
+          ` : ''}
+
+          <h2 style="margin-top:22px;">Tempos por LOTE <span class="lock-tag">não multiplica pela quantidade nem por fornadas</span></h2>
+          <p class="card-note">Trabalho feito uma única vez para o pedido inteiro, independente de quantas peças ou fornadas.</p><div class="grid">
+            ${fieldDHM("tempoPreparacaoLote", "Preparação")}
+            ${fieldDHM("tempoConfiguracaoLote", "Configuração")}
+            ${fieldDHM("tempoPreparacaoMaquinaLote", "Preparação da máquina")}
+            ${fieldDHM("outrosTemposLote", "Outros trabalhos gerais")}
+          </div>
+          ${producaoAtiva ? `
+          <h2 style="margin-top:22px;">Tempos por FORNADA <span class="lock-tag">multiplica pelo número de fornadas</span></h2>
+          <p class="card-note">Trabalho que precisa ser repetido a cada nova fornada (ex.: trocar a mesa, retirar as peças).</p><div class="grid">
+            ${fieldDHM("tempoPreparacaoFornada", "Preparação da fornada")}
+            ${fieldDHM("tempoRetiradaFornada", "Retirada/limpeza da mesa")}
+            ${fieldDHM("outrosTemposFornada", "Outros trabalhos por fornada")}
+          </div>` : ''}
+          <h2 style="margin-top:22px;">Tempos por PEÇA <span class="lock-tag">multiplica pela quantidade</span></h2>
+          <p class="card-note">Trabalho repetido em cada unidade produzida.</p><div class="grid">
+            ${fieldDHM("tempoAcabamentoPeca", "Acabamento")}
+            ${fieldDHM("tempoMontagemPeca", "Montagem")}
+            ${fieldDHM("tempoEmbalagemPeca", "Embalagem")}
+            ${fieldDHM("outrosTemposPeca", "Outros trabalhos unitários")}
+          </div>
+          <h2 style="margin-top:22px;">Acabamento — materiais extras</h2><div class="grid">
+            <div class="field"><label>Valor (R$)</label><input type="number" min="0" step="0.01" data-p="acabamentoExtraValor" value="${draft.acabamentoExtraValor}"></div>
+            <div class="field"><label>Cobrança</label><select data-p="acabamentoExtraModo">
+                <option value="peca" ${draft.acabamentoExtraModo==='peca'?'selected':''}>Por peça</option>
+                <option value="lote" ${draft.acabamentoExtraModo==='lote'?'selected':''}>Por lote (pedido inteiro)</option>
+              </select></div>
+          </div>
+          <h2 style="margin-top:22px;">Serviços adicionais</h2>
           <p class="card-note">Modelagem, alteração de arquivo, projeto sob medida — cobrado à parte da produção física.</p><div class="grid">
             ${fieldDHM("modelagem3dHoras", "Modelagem 3D")}
             ${fieldDHM("alteracaoModeloHoras", "Alteração de modelo")}
@@ -1254,7 +1315,9 @@ function viewNovoPedido(){
             ${fieldDHM("prototipagemHoras", "Prototipagem/testes")}
             ${fieldDHM("outrosServicosHoras", "Outros serviços")}
             <div class="field"><label>Materiais/serviços extras (R$)</label><input type="number" min="0" step="0.01" data-p="materiaisServicosExtras" value="${draft.materiaisServicosExtras}"></div>
-          </div></div>
+          </div>
+          </div>
+        </details>
         <div style="display:flex; gap:10px;">
           <button class="btn" id="save-pedido">${editingPedidoId?'Salvar alterações':'Salvar orçamento'}</button>
           <button class="btn ghost" id="cancel-pedido">Cancelar</button>
@@ -1285,8 +1348,7 @@ function viewNovoPedido(){
             <div class="line"><span>Mão de obra (peça)</span><span>${fmtR(r.maoObraPeca)}</span></div>
             <div class="line"><span>Reserva para falhas/reimpressões</span><span>${fmtR(r.custoRisco)}</span></div>
             <div class="line"><span>Acabamento (materiais)</span><span>${fmtR(r.acabamentoMaterial)}</span></div>
-            <div class="line"><span>Embalagem (padrão configurada)</span><span>${fmtR(r.custoEmbalagem)}</span></div>
-            <div class="line"><span>Embalagens (itens escolhidos)</span><span>${fmtR(r.custoEmbalagensItens)}</span></div>
+            <div class="line"><span>Embalagens</span><span>${fmtR(r.custoEmbalagensItens)}</span></div>
             <div class="line"><span>Adicionais</span><span>${fmtR(r.custoAdicionaisItens)}</span></div>
             <div class="line"><span>Custos indiretos rateados</span><span>${fmtR(r.custosIndiretos)}</span></div>
             <div class="line"><span>Serviços de projeto/modelagem</span><span>${fmtR(r.custoServicos)}</span></div>
@@ -1430,7 +1492,7 @@ function bindEvents(){
   });
   document.querySelectorAll('[data-p]').forEach(el=>{
     el.onchange = ()=>{ const k = el.dataset.p;
-      const textKeys = ['data','cliente','produto','status','materialId','impressoraId','acabamentoExtraModo','modoTempoAms'];
+      const textKeys = ['data','cliente','produto','status','materialId','impressoraId','acabamentoExtraModo','modoTempoAms','pesoModo'];
       draft[k] = textKeys.includes(k) ? el.value : Math.max(0, parseFloat(el.value)||0);
       render(); };
   });
