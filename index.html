@@ -63,6 +63,10 @@
   input:focus, select:focus{outline:2px solid var(--accent); outline-offset:1px; border-color:var(--accent);}
   .field{margin-bottom:0;}
   .field.locked input{background:var(--locked-bg); color:var(--locked-text); border-color:var(--line);}
+  .dhm-group{display:flex; gap:6px;}
+  .dhm-item{flex:1; display:flex; align-items:center; gap:4px; border:1px solid var(--line); border-radius:6px; padding:0 8px; background:#fff;}
+  .dhm-item input{border:none; padding:8px 0; width:100%; text-align:right;}
+  .dhm-item span{font-size:11px; color:var(--ink-soft); flex-shrink:0;}
   .field.locked label{display:flex; align-items:center; gap:5px;}
   .lock-tag{font-size:9px; background:var(--locked-bg); color:var(--locked-text); padding:1px 5px; border-radius:3px; font-weight:700; letter-spacing:.03em;}
   table{width:100%; border-collapse:collapse; font-size:13px;}
@@ -239,7 +243,7 @@ const DEFAULT_CONFIG = {
   impedirPrecoAbaixoMinimo: true
 };
 
-let state = { config: { ...DEFAULT_CONFIG }, materiais: [], impressoras: [], pedidos: [] };
+let state = { config: { ...DEFAULT_CONFIG }, materiais: [], impressoras: [], embalagens: [], adicionais: [], pedidos: [] };
 let github = { owner:'', repo:'', path:'data.json', branch:'main', token:'' };
 let ghSha = null;
 let syncState = 'off'; // off | busy | ok | err
@@ -248,6 +252,7 @@ let tab = 'novo';
 let editingPedidoId = null;
 let draft = null;
 let saveTimer = null;
+let dirty = false; // true entre uma edição e o push confirmado — nunca fazemos refetch automático nesse meio-tempo
 let formErrors = [];
 
 // ---------- migrations (keep old saved data working with the new model) ----------
@@ -275,6 +280,9 @@ function migratePedido(p){
     // acabamento (materiais)
     acabamentoExtraValor: p.acabamentoExtraValor ?? p.acabamentoExtra ?? 0,
     acabamentoExtraModo: p.acabamentoExtraModo ?? 'peca',
+    // embalagens e adicionais escolhidos neste orçamento (itens do catálogo + quantidade)
+    embalagensItens: Array.isArray(p.embalagensItens) ? p.embalagensItens : [],
+    adicionaisItens: Array.isArray(p.adicionaisItens) ? p.adicionaisItens : [],
     // produção em fornadas — pedidos antigos vêm com producaoPorFornada:false, preservando
     // exatamente o comportamento anterior (tempoImpressao interpretado como tempo por PEÇA)
     producaoPorFornada: p.producaoPorFornada ?? false,
@@ -337,6 +345,8 @@ async function ghFetch(){
       config: migrateConfig(remote.config),
       materiais: remote.materiais||[],
       impressoras: remote.impressoras||[],
+      embalagens: remote.embalagens||[],
+      adicionais: remote.adicionais||[],
       pedidos: (remote.pedidos||[]).map(migratePedido)
     };
     localStorage.setItem(LS_DATA_KEY, JSON.stringify(state));
@@ -356,7 +366,7 @@ async function ghGetLatestSha(){
   return json.sha;
 }
 async function ghPush(retry){
-  if (!githubConfigured()) { localStorage.setItem(LS_DATA_KEY, JSON.stringify(state)); return; }
+  if (!githubConfigured()) { localStorage.setItem(LS_DATA_KEY, JSON.stringify(state)); return true; }
   setSync('busy','Salvando no GitHub…');
   try{
     const url = `https://api.github.com/repos/${github.owner}/${github.repo}/contents/${encodeURIComponent(github.path)}`;
@@ -368,14 +378,14 @@ async function ghPush(retry){
         // Já tentamos uma vez preservando o estado local e mesmo assim houve outro conflito.
         // Não sobrescrevemos nada silenciosamente — avisamos e paramos.
         setSync('err', 'Conflito de sincronização no GitHub — suas alterações NÃO foram perdidas e continuam só neste navegador. Abra a aba Sincronização e tente salvar novamente.');
-        return;
+        return false;
       }
       // Preserva `state` local integralmente. Busca só o SHA mais recente para poder tentar de novo.
       try{
         ghSha = await ghGetLatestSha();
       } catch(shaErr){
         setSync('err', 'Conflito de sincronização no GitHub e falha ao obter a versão mais recente: ' + shaErr.message);
-        return;
+        return false;
       }
       return ghPush(true);
     }
@@ -384,8 +394,10 @@ async function ghPush(retry){
     ghSha = json.content.sha;
     localStorage.setItem(LS_DATA_KEY, JSON.stringify(state));
     setSync('ok', 'Salvo no GitHub às ' + new Date().toLocaleTimeString('pt-BR'));
+    return true;
   } catch(e){
     setSync('err', 'Falha ao salvar no GitHub: ' + e.message);
+    return false;
   }
 }
 function setSync(s,msg){ syncState=s; syncMsg=msg; renderSyncStatus(); }
@@ -399,10 +411,20 @@ function renderSyncStatus(){
   el.innerHTML = `<span class="sync-dot ${syncState}"></span>${syncMsg}`;
 }
 function queueSync(){
+  dirty = true;
   localStorage.setItem(LS_DATA_KEY, JSON.stringify(state));
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(()=>ghPush(false), 1200);
+  saveTimer = setTimeout(async ()=>{ const ok = await ghPush(false); if (ok) dirty = false; }, 1200);
 }
+// Ao voltar para a aba/janela, busca a versão mais recente do GitHub automaticamente —
+// mas só quando não há nenhuma alteração local ainda não sincronizada (nunca descarta edição em andamento).
+function autoRefreshOnFocus(){
+  if (githubConfigured() && !dirty){
+    ghFetch().then(render);
+  }
+}
+document.addEventListener('visibilitychange', ()=>{ if (document.visibilityState === 'visible') autoRefreshOnFocus(); });
+window.addEventListener('focus', autoRefreshOnFocus);
 
 async function init(){
   loadSettings();
@@ -414,6 +436,8 @@ async function init(){
         config: migrateConfig(parsed.config),
         materiais: parsed.materiais||[],
         impressoras: parsed.impressoras||[],
+        embalagens: parsed.embalagens||[],
+        adicionais: parsed.adicionais||[],
         pedidos: (parsed.pedidos||[]).map(migratePedido)
       };
     }
@@ -436,6 +460,14 @@ function seedExample(){
   ];
   state.impressoras = [
     { id: 'bambu-a1-padrao', nome:'Bambu Lab A1', modelo:'A1', valorAquisicao:3500, vidaUtil:8000, potencia:95, manutencaoMensal:50, horasMes:180 },
+  ];
+  state.embalagens = [
+    { id: 'caixa-pequena', nome:'Caixa pequena', valor:3.5 },
+    { id: 'saco-plastico', nome:'Saco plástico', valor:0.8 },
+  ];
+  state.adicionais = [
+    { id: 'cartao-agradecimento', nome:'Cartão de agradecimento', valor:1.5, tipoCobranca:'unidade' },
+    { id: 'garantia-extra', nome:'Garantia estendida', valor:10, tipoCobranca:'fixo' },
   ];
 }
 function uid(){ return Math.random().toString(36).slice(2,10); }
@@ -480,7 +512,6 @@ function computePricing(custoTotal, cfg){
   return { precoMinimo, recomendado, promocional, atacado, percentuaisValidos };
 }
 
-// Pura: todo o custeio de um pedido, dado config/material/impressora explícitos (testável isoladamente).
 // Pura: calcula quantas fornadas são necessárias e o tamanho da última fornada.
 // Quando produção em fornadas está desativada (ou quantidade <= 1), cada peça é sua própria "fornada",
 // preservando exatamente o comportamento antigo (tempoImpressao × quantidade).
@@ -521,7 +552,9 @@ function calcularTempoAmsFornada(p){
 }
 function amsCoresValidas(n){ return n >= 1 && n <= 4; }
 
-function calcPedidoCore(p, cfg, mat, imp){
+function calcPedidoCore(p, cfg, mat, imp, embalagensCat, adicionaisCat){
+  embalagensCat = embalagensCat || [];
+  adicionaisCat = adicionaisCat || [];
   const qtd = Math.max(0, p.quantidade||0);
   const pesoTotal = Math.max(0, p.peso||0) * qtd; // material sempre por PEÇA — fornadas não alteram isso
 
@@ -578,6 +611,24 @@ function calcPedidoCore(p, cfg, mat, imp){
   const custoEmbalagemUnit = (cfg.custoEmbalagem||0) + (cfg.custoEtiqueta||0) + (cfg.custoConsumiveis||0);
   const custoEmbalagem = custoEmbalagemUnit * qtd;
 
+  // Embalagens escolhidas do catálogo (itens específicos, com quantidade própria por item) — somam-se
+  // ao custo de embalagem padrão acima, sem substituí-lo. Se preferir usar só o catálogo, zere os
+  // valores de embalagem/etiqueta/consumíveis em Configurações.
+  const custoEmbalagensItens = (p.embalagensItens||[]).reduce((soma, it) => {
+    const e = embalagensCat.find(x => x.id === it.embalagemId);
+    return soma + (e ? e.valor * Math.max(0, it.quantidade||0) : 0);
+  }, 0);
+
+  // Adicionais escolhidos do catálogo. "unidade" multiplica pela quantidade do item; "fixo" cobra
+  // uma vez só, independente da quantidade informada naquele item.
+  const custoAdicionaisItens = (p.adicionaisItens||[]).reduce((soma, it) => {
+    const a = adicionaisCat.find(x => x.id === it.adicionalId);
+    if (!a) return soma;
+    const qtdItem = Math.max(0, it.quantidade||0);
+    const valorItem = a.tipoCobranca === 'fixo' ? a.valor : a.valor * qtdItem;
+    return soma + valorItem;
+  }, 0);
+
   const horasServicos = Math.max(0,p.modelagem3dHoras||0) + Math.max(0,p.alteracaoModeloHoras||0)
     + Math.max(0,p.projetoPersonalizadoHoras||0) + Math.max(0,p.prototipagemHoras||0) + Math.max(0,p.outrosServicosHoras||0);
   const tarifaServico = cfg.tarifaProjetoHora || cfg.maoObraHora || 0;
@@ -588,7 +639,8 @@ function calcPedidoCore(p, cfg, mat, imp){
   const custosIndiretos = horasProdutivas * (cfg.custosIndiretosHora||0);
 
   // ---- custo total real ----
-  const custoTotal = custoProdutivoAposRisco + acabamentoMaterial + custoEmbalagem + custosIndiretos + custoServicos;
+  const custoTotal = custoProdutivoAposRisco + acabamentoMaterial + custoEmbalagem + custoEmbalagensItens
+    + custosIndiretos + custoServicos + custoAdicionaisItens;
 
   const pricing = computePricing(custoTotal, cfg);
   const precoUnitario = qtd > 0 ? pricing.recomendado.preco / qtd : 0;
@@ -599,7 +651,7 @@ function calcPedidoCore(p, cfg, mat, imp){
     custoEnergia, custoDepreciacao, custoManutencao, custoMaquina,
     maoObraLote, maoObraFornada, maoObraPeca, maoObraTotal,
     custoProdutivoAntesRisco, custoRisco, custoProdutivoAposRisco,
-    acabamentoMaterial, custoEmbalagem, custoServicos, custosIndiretos,
+    acabamentoMaterial, custoEmbalagem, custoEmbalagensItens, custoAdicionaisItens, custoServicos, custosIndiretos,
     custoTotal, precoUnitario,
     ...pricing
   };
@@ -608,17 +660,17 @@ function calcPedido(p){
   const cfg = state.config;
   const mat = state.materiais.find(m => m.id === p.materialId);
   const imp = state.impressoras.find(i => i.id === p.impressoraId);
-  return calcPedidoCore(p, cfg, mat, imp);
+  return calcPedidoCore(p, cfg, mat, imp, state.embalagens, state.adicionais);
 }
 
 // Comparativo informativo (NÃO é desconto comercial): custo por peça produzindo uma de cada vez
 // vs. custo por peça usando a fornada configurada. Só os custos que realmente variam com o número
 // de fornadas mudam (tempo de máquina, energia, depreciação, manutenção, trabalhos por fornada);
 // custos por peça e custos gerais do pedido permanecem os mesmos nos dois cenários.
-function calcEconomiaFornada(p, cfg, mat, imp){
+function calcEconomiaFornada(p, cfg, mat, imp, embalagensCat, adicionaisCat){
   if (!p.producaoPorFornada || !(p.quantidade > 1) || !(p.tempoImpressao > 0)) return null;
-  const comFornada = calcPedidoCore(p, cfg, mat, imp);
-  const semFornada = calcPedidoCore({ ...p, producaoPorFornada:false }, cfg, mat, imp);
+  const comFornada = calcPedidoCore(p, cfg, mat, imp, embalagensCat, adicionaisCat);
+  const semFornada = calcPedidoCore({ ...p, producaoPorFornada:false }, cfg, mat, imp, embalagensCat, adicionaisCat);
   if (!(comFornada.qtd > 0) || !(semFornada.qtd > 0)) return null;
   if (comFornada.producao.fornadas >= semFornada.qtd) return null; // sem lote real, nada a comparar
   const custoUnitCom = comFornada.custoTotal / comFornada.qtd;
@@ -651,7 +703,7 @@ function validatePedidoForSave(p, cfg){
   const soma = (cfg.percImpostos||0)+(cfg.percComissao||0)+(cfg.percMargem||0);
   if (soma >= 1) errs.push('Impostos + comissão + margem somam 100% ou mais — ajuste em Configurações antes de salvar.');
   if (cfg.impedirPrecoAbaixoMinimo && mat && imp){
-    const r = calcPedidoCore(p, cfg, mat, imp);
+    const r = calcPedidoCore(p, cfg, mat, imp, state.embalagens, state.adicionais);
     if (r.promocional.abaixoMinimo) errs.push('O preço promocional configurado ficaria abaixo do preço mínimo — ajuste o desconto ou desative essa trava em Configurações.');
     if (r.atacado.abaixoMinimo) errs.push('O preço de atacado configurado ficaria abaixo do preço mínimo — ajuste o desconto ou desative essa trava em Configurações.');
   }
@@ -686,6 +738,7 @@ function pedidoTeste(overrides){
     tempoPreparacaoLote:0, tempoConfiguracaoLote:0, tempoPreparacaoMaquinaLote:0, outrosTemposLote:0,
     tempoAcabamentoPeca:0, tempoMontagemPeca:0, tempoEmbalagemPeca:0, outrosTemposPeca:0,
     acabamentoExtraValor:0, acabamentoExtraModo:'peca',
+    embalagensItens:[], adicionaisItens:[],
     producaoPorFornada:false, pecasPorFornada:1,
     tempoPreparacaoFornada:0, tempoRetiradaFornada:0, outrosTemposFornada:0,
     usarAmsLite:false, quantidadeCores:1, modoTempoAms:'total', tempoAdicionalAmsFornada:0,
@@ -880,6 +933,8 @@ function render(){
   if (tab==='config') m.innerHTML = viewConfig();
   else if (tab==='materiais') m.innerHTML = viewMateriais();
   else if (tab==='impressoras') m.innerHTML = viewImpressoras();
+  else if (tab==='embalagens') m.innerHTML = viewEmbalagens();
+  else if (tab==='adicionais') m.innerHTML = viewAdicionais();
   else if (tab==='novo') m.innerHTML = viewNovoPedido();
   else if (tab==='lista') m.innerHTML = viewListaPedidos();
   else if (tab==='github') m.innerHTML = viewGithub();
@@ -888,12 +943,37 @@ function render(){
 }
 function renderNav(){
   const items = [['novo','Novo orçamento'],['lista','Orçamentos'],['materiais','Materiais'],
-    ['impressoras','Impressoras'],['config','Configurações'],['testes','Testes'],['github','Sincronização']];
+    ['impressoras','Impressoras'],['embalagens','Embalagens'],['adicionais','Adicionais'],
+    ['config','Configurações'],['testes','Testes'],['github','Sincronização']];
   document.getElementById('nav').innerHTML = items.map(([id,label]) =>
     `<button data-tab="${id}" class="${tab===id?'active':''}">${label}</button>`).join('');
 }
 function fieldNum(key, val, label, step='0.01'){
   return `<div class="field"><label>${label}</label><input type="number" min="0" step="${step}" data-cfg="${key}" value="${val}"></div>`;
+}
+// Campos de tempo do pedido são editados em dias/horas/minutos, mas continuam guardados
+// e usados internamente como horas decimais — o motor de cálculo não muda em nada.
+function decompDHM(decimalHoras){
+  const totalMin = Math.round(Math.max(0, decimalHoras||0) * 60);
+  const dias = Math.floor(totalMin / (24*60));
+  const restoAposDias = totalMin % (24*60);
+  const horas = Math.floor(restoAposDias / 60);
+  const minutos = restoAposDias % 60;
+  return { dias, horas, minutos };
+}
+function composeDHM(dias, horas, minutos){
+  return (Math.max(0,dias||0)*24) + Math.max(0,horas||0) + (Math.max(0,minutos||0)/60);
+}
+function fieldDHM(key, label){
+  const { dias, horas, minutos } = decompDHM(draft[key]);
+  return `<div class="field">
+    <label>${label}</label>
+    <div class="dhm-group">
+      <div class="dhm-item"><input type="number" min="0" step="1" data-dhm="${key}" data-dhm-u="d" value="${dias}"><span>d</span></div>
+      <div class="dhm-item"><input type="number" min="0" step="1" data-dhm="${key}" data-dhm-u="h" value="${horas}"><span>h</span></div>
+      <div class="dhm-item"><input type="number" min="0" step="1" data-dhm="${key}" data-dhm-u="m" value="${minutos}"><span>min</span></div>
+    </div>
+  </div>`;
 }
 function fieldCheckbox(key, checked, label){
   return `<div class="field"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
@@ -973,6 +1053,32 @@ function viewImpressoras(){
       <table><thead><tr><th>Nome</th><th>Modelo</th><th>Valor (R$)</th><th>Vida útil (h)</th><th>Potência média (W)</th><th>Manut./mês (R$)</th><th>h produtivas/mês</th><th>R$/h <span class="lock-tag">calc</span></th><th></th></tr></thead>
         <tbody>${rows || `<tr><td colspan="9"><div class="empty">Nenhuma impressora cadastrada ainda.</div></td></tr>`}</tbody></table></div>`;
 }
+function viewEmbalagens(){
+  const rows = state.embalagens.map(e => `<tr data-id="${e.id}">
+      <td><input data-emb="nome" value="${e.nome}" style="min-width:160px"></td>
+      <td><input data-emb="valor" type="number" min="0" step="0.01" value="${e.valor}" style="width:100px" class="num"></td>
+      <td><button class="btn danger small" data-del-emb="${e.id}">Remover</button></td></tr>`).join('');
+  return `<h1>Embalagens</h1><p class="lead">Cadastre suas caixas, sacos, plásticos etc. Depois é só escolher e informar a quantidade em cada orçamento.</p>
+    <div class="card"><div class="toolbar"><h2 style="margin:0">Embalagens cadastradas</h2>
+        <button class="btn" id="add-emb">+ Adicionar embalagem</button></div>
+      <table><thead><tr><th>Nome</th><th>Valor (R$)</th><th></th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="3"><div class="empty">Nenhuma embalagem cadastrada ainda.</div></td></tr>`}</tbody></table></div>`;
+}
+function viewAdicionais(){
+  const rows = state.adicionais.map(a => `<tr data-id="${a.id}">
+      <td><input data-adc="nome" value="${a.nome}" style="min-width:160px"></td>
+      <td><input data-adc="valor" type="number" min="0" step="0.01" value="${a.valor}" style="width:100px" class="num"></td>
+      <td><select data-adc="tipoCobranca">
+          <option value="unidade" ${a.tipoCobranca!=='fixo'?'selected':''}>Por unidade escolhida</option>
+          <option value="fixo" ${a.tipoCobranca==='fixo'?'selected':''}>Valor fixo (1x, não multiplica)</option>
+        </select></td>
+      <td><button class="btn danger small" data-del-adc="${a.id}">Remover</button></td></tr>`).join('');
+  return `<h1>Adicionais</h1><p class="lead">Serviços ou itens extras vendidos junto com a peça (ex: garantia, cartão, brinde).</p>
+    <div class="card"><div class="toolbar"><h2 style="margin:0">Adicionais cadastrados</h2>
+        <button class="btn" id="add-adc">+ Adicionar item</button></div>
+      <table><thead><tr><th>Nome</th><th>Valor (R$)</th><th>Cobrança</th><th></th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="4"><div class="empty">Nenhum adicional cadastrado ainda.</div></td></tr>`}</tbody></table></div>`;
+}
 function emptyPedido(){
   return { id:null, numero: nextNumero(), data: new Date().toISOString().slice(0,10), cliente:'', produto:'',
     quantidade:0, materialId: state.materiais[0]?.id||'', peso:0, impressoraId: state.impressoras[0]?.id||'',
@@ -980,6 +1086,7 @@ function emptyPedido(){
     tempoPreparacaoLote:0, tempoConfiguracaoLote:0, tempoPreparacaoMaquinaLote:0, outrosTemposLote:0,
     tempoAcabamentoPeca:0, tempoMontagemPeca:0, tempoEmbalagemPeca:0, outrosTemposPeca:0,
     acabamentoExtraValor:0, acabamentoExtraModo:'peca',
+    embalagensItens:[], adicionaisItens:[],
     producaoPorFornada:false, pecasPorFornada:1,
     tempoPreparacaoFornada:0, tempoRetiradaFornada:0, outrosTemposFornada:0,
     usarAmsLite:false, quantidadeCores:1, modoTempoAms:'total', tempoAdicionalAmsFornada:0,
@@ -998,7 +1105,7 @@ function viewNovoPedido(){
   const r = calcPedido(draft);
   const matSel = state.materiais.find(m=>m.id===draft.materialId);
   const impSel = state.impressoras.find(i=>i.id===draft.impressoraId);
-  const economia = calcEconomiaFornada(draft, state.config, matSel, impSel);
+  const economia = calcEconomiaFornada(draft, state.config, matSel, impSel, state.embalagens, state.adicionais);
   const matOpts = state.materiais.map(m=>`<option value="${m.id}" ${m.id===draft.materialId?'selected':''}>${m.nome}</option>`).join('');
   const impOpts = state.impressoras.map(i=>`<option value="${i.id}" ${i.id===draft.impressoraId?'selected':''}>${i.nome}</option>`).join('');
   const noRes = !state.materiais.length || !state.impressoras.length;
@@ -1020,17 +1127,17 @@ function viewNovoPedido(){
     <div class="two-col"><div>
         <div class="card"><h2>Dados do pedido</h2><div class="grid">
             <div class="field locked"><label>Nº orçamento <span class="lock-tag">auto</span></label><input value="${draft.numero}" disabled></div>
-            <div class="field"><label>Data</label><input type="date" data-p="data" value="${draft.data}"></div>
-            <div class="field"><label>Cliente</label><input data-p="cliente" value="${draft.cliente}"></div>
             <div class="field"><label>Produto/Peça</label><input data-p="produto" value="${draft.produto}"></div>
             <div class="field"><label>Quantidade</label><input type="number" min="0" step="1" data-p="quantidade" value="${draft.quantidade}"></div>
+            <div class="field"><label>Cliente</label><input data-p="cliente" value="${draft.cliente}"></div>
+            <div class="field"><label>Data</label><input type="date" data-p="data" value="${draft.data}"></div>
             <div class="field"><label>Status</label><select data-p="status">${STATUS.map(s=>`<option ${s===draft.status?'selected':''}>${s}</option>`).join('')}</select></div>
           </div></div>
         <div class="card"><h2>Material e impressão</h2><div class="grid">
             <div class="field"><label>Material</label><select data-p="materialId">${matOpts}</select></div>
             <div class="field"><label>Peso por peça (g)</label><input type="number" min="0" step="1" data-p="peso" value="${draft.peso}"></div>
             <div class="field"><label>Impressora</label><select data-p="impressoraId">${impOpts}</select></div>
-            <div class="field"><label>${tempoLabel}</label><input type="number" min="0" step="0.1" data-p="tempoImpressao" value="${draft.tempoImpressao}"></div>
+            ${fieldDHM("tempoImpressao", tempoLabel)}
           </div>
           <p class="card-note" style="margin-top:10px;">${tempoDesc}</p></div>
         ${mostraFornadas ? `
@@ -1072,7 +1179,7 @@ function viewNovoPedido(){
             <div class="field"><label>Tempo médio por troca (segundos)</label><input type="number" min="0" step="1" data-p="segundosPorTroca" value="${draft.segundosPorTroca}"></div>
             <div class="field locked"><label>Tempo AMS estimado (h) <span class="lock-tag">calc</span></label><input value="${calcularTempoAmsFornada(draft).toFixed(2)}" disabled></div>
             ` : `
-            <div class="field"><label>Tempo adicional AMS (h)</label><input type="number" min="0" step="0.1" data-p="tempoAdicionalAmsFornada" value="${draft.tempoAdicionalAmsFornada}"></div>
+            ${fieldDHM("tempoAdicionalAmsFornada", "Tempo adicional AMS")}
             `}
           </div>` : ''}
           <p class="card-note" style="margin-top:10px;">Cores utilizadas: ${draft.quantidadeCores}${draft.quantidadeCores>1 ? ' — ⚠️ mais cores podem aumentar o tempo de impressão devido às trocas de filamento.' : ''}</p>
@@ -1080,24 +1187,24 @@ function viewNovoPedido(){
         </div>
         <div class="card"><h2>Tempos por LOTE <span class="lock-tag">não multiplica pela quantidade nem por fornadas</span></h2>
           <p class="card-note">Trabalho feito uma única vez para o pedido inteiro, independente de quantas peças ou fornadas.</p><div class="grid">
-            <div class="field"><label>Preparação (h)</label><input type="number" min="0" step="0.1" data-p="tempoPreparacaoLote" value="${draft.tempoPreparacaoLote}"></div>
-            <div class="field"><label>Configuração (h)</label><input type="number" min="0" step="0.1" data-p="tempoConfiguracaoLote" value="${draft.tempoConfiguracaoLote}"></div>
-            <div class="field"><label>Preparação da máquina (h)</label><input type="number" min="0" step="0.1" data-p="tempoPreparacaoMaquinaLote" value="${draft.tempoPreparacaoMaquinaLote}"></div>
-            <div class="field"><label>Outros trabalhos gerais (h)</label><input type="number" min="0" step="0.1" data-p="outrosTemposLote" value="${draft.outrosTemposLote}"></div>
+            ${fieldDHM("tempoPreparacaoLote", "Preparação")}
+            ${fieldDHM("tempoConfiguracaoLote", "Configuração")}
+            ${fieldDHM("tempoPreparacaoMaquinaLote", "Preparação da máquina")}
+            ${fieldDHM("outrosTemposLote", "Outros trabalhos gerais")}
           </div></div>
         ${producaoAtiva ? `
         <div class="card"><h2>Tempos por FORNADA <span class="lock-tag">multiplica pelo número de fornadas</span></h2>
           <p class="card-note">Trabalho que precisa ser repetido a cada nova fornada (ex.: trocar a mesa, retirar as peças).</p><div class="grid">
-            <div class="field"><label>Preparação da fornada (h)</label><input type="number" min="0" step="0.1" data-p="tempoPreparacaoFornada" value="${draft.tempoPreparacaoFornada}"></div>
-            <div class="field"><label>Retirada/limpeza da mesa (h)</label><input type="number" min="0" step="0.1" data-p="tempoRetiradaFornada" value="${draft.tempoRetiradaFornada}"></div>
-            <div class="field"><label>Outros trabalhos por fornada (h)</label><input type="number" min="0" step="0.1" data-p="outrosTemposFornada" value="${draft.outrosTemposFornada}"></div>
+            ${fieldDHM("tempoPreparacaoFornada", "Preparação da fornada")}
+            ${fieldDHM("tempoRetiradaFornada", "Retirada/limpeza da mesa")}
+            ${fieldDHM("outrosTemposFornada", "Outros trabalhos por fornada")}
           </div></div>` : ''}
         <div class="card"><h2>Tempos por PEÇA <span class="lock-tag">multiplica pela quantidade</span></h2>
           <p class="card-note">Trabalho repetido em cada unidade produzida.</p><div class="grid">
-            <div class="field"><label>Acabamento (h)</label><input type="number" min="0" step="0.1" data-p="tempoAcabamentoPeca" value="${draft.tempoAcabamentoPeca}"></div>
-            <div class="field"><label>Montagem (h)</label><input type="number" min="0" step="0.1" data-p="tempoMontagemPeca" value="${draft.tempoMontagemPeca}"></div>
-            <div class="field"><label>Embalagem (h)</label><input type="number" min="0" step="0.1" data-p="tempoEmbalagemPeca" value="${draft.tempoEmbalagemPeca}"></div>
-            <div class="field"><label>Outros trabalhos unitários (h)</label><input type="number" min="0" step="0.1" data-p="outrosTemposPeca" value="${draft.outrosTemposPeca}"></div>
+            ${fieldDHM("tempoAcabamentoPeca", "Acabamento")}
+            ${fieldDHM("tempoMontagemPeca", "Montagem")}
+            ${fieldDHM("tempoEmbalagemPeca", "Embalagem")}
+            ${fieldDHM("outrosTemposPeca", "Outros trabalhos unitários")}
           </div></div>
         <div class="card"><h2>Acabamento — materiais extras</h2><div class="grid">
             <div class="field"><label>Valor (R$)</label><input type="number" min="0" step="0.01" data-p="acabamentoExtraValor" value="${draft.acabamentoExtraValor}"></div>
@@ -1106,13 +1213,46 @@ function viewNovoPedido(){
                 <option value="lote" ${draft.acabamentoExtraModo==='lote'?'selected':''}>Por lote (pedido inteiro)</option>
               </select></div>
           </div></div>
+        <div class="card"><h2>Embalagens</h2>
+          <p class="card-note">Escolha as embalagens usadas neste orçamento e a quantidade de cada uma.</p>
+          ${state.embalagens.length ? `
+          <div style="display:flex; gap:8px; margin-bottom:14px; align-items:flex-end;">
+            <div class="field" style="flex:2;"><label>Embalagem</label><select id="add-emb-select">${state.embalagens.map(e=>`<option value="${e.id}">${e.nome} — ${fmtR(e.valor)}</option>`).join('')}</select></div>
+            <div class="field" style="flex:1;"><label>Quantidade</label><input id="add-emb-qtd" type="number" min="1" step="1" value="1"></div>
+            <button class="btn" id="add-emb-item" style="height:37px;">+ Adicionar</button>
+          </div>` : `<div class="tag-note" style="margin-bottom:0;">Nenhuma embalagem cadastrada — vá em "Embalagens" no menu para criar.</div>`}
+          ${draft.embalagensItens.length ? `<table><thead><tr><th>Embalagem</th><th>Valor</th><th>Qtd</th><th>Subtotal</th><th></th></tr></thead><tbody>
+            ${draft.embalagensItens.map(it=>{ const e = state.embalagens.find(x=>x.id===it.embalagemId);
+              const nome = e? e.nome : '(removida do cadastro)'; const valorUnit = e? e.valor : 0; const sub = valorUnit*(it.quantidade||0);
+              return `<tr><td>${nome}</td><td class="num mono">${fmtR(valorUnit)}</td>
+                <td class="num"><input type="number" min="1" step="1" data-emb-item-qtd="${it.lineId}" value="${it.quantidade}" style="width:60px; text-align:right;"></td>
+                <td class="num mono">${fmtR(sub)}</td><td><button class="btn danger small" data-del-emb-item="${it.lineId}">Remover</button></td></tr>`; }).join('')}
+          </tbody></table>` : ''}
+        </div>
+        <div class="card"><h2>Adicionais</h2>
+          <p class="card-note">Serviços ou itens extras vendidos junto com a peça.</p>
+          ${state.adicionais.length ? `
+          <div style="display:flex; gap:8px; margin-bottom:14px; align-items:flex-end;">
+            <div class="field" style="flex:2;"><label>Adicional</label><select id="add-adc-select">${state.adicionais.map(a=>`<option value="${a.id}">${a.nome} — ${fmtR(a.valor)}${a.tipoCobranca==='fixo'?' (fixo)':'/un.'}</option>`).join('')}</select></div>
+            <div class="field" style="flex:1;"><label>Quantidade</label><input id="add-adc-qtd" type="number" min="1" step="1" value="1"></div>
+            <button class="btn" id="add-adc-item" style="height:37px;">+ Adicionar</button>
+          </div>` : `<div class="tag-note" style="margin-bottom:0;">Nenhum adicional cadastrado — vá em "Adicionais" no menu para criar.</div>`}
+          ${draft.adicionaisItens.length ? `<table><thead><tr><th>Adicional</th><th>Valor</th><th>Qtd</th><th>Subtotal</th><th></th></tr></thead><tbody>
+            ${draft.adicionaisItens.map(it=>{ const a = state.adicionais.find(x=>x.id===it.adicionalId);
+              const nome = a? a.nome : '(removido do cadastro)'; const valorUnit = a? a.valor : 0;
+              const fixo = a && a.tipoCobranca==='fixo'; const sub = fixo ? valorUnit : valorUnit*(it.quantidade||0);
+              return `<tr><td>${nome}${fixo?' <span class="lock-tag">fixo</span>':''}</td><td class="num mono">${fmtR(valorUnit)}</td>
+                <td class="num"><input type="number" min="1" step="1" data-adc-item-qtd="${it.lineId}" value="${it.quantidade}" style="width:60px; text-align:right;" ${fixo?'disabled':''}></td>
+                <td class="num mono">${fmtR(sub)}</td><td><button class="btn danger small" data-del-adc-item="${it.lineId}">Remover</button></td></tr>`; }).join('')}
+          </tbody></table>` : ''}
+        </div>
         <div class="card"><h2>Serviços adicionais <span class="lock-tag">opcional</span></h2>
           <p class="card-note">Modelagem, alteração de arquivo, projeto sob medida — cobrado à parte da produção física.</p><div class="grid">
-            <div class="field"><label>Modelagem 3D (h)</label><input type="number" min="0" step="0.1" data-p="modelagem3dHoras" value="${draft.modelagem3dHoras}"></div>
-            <div class="field"><label>Alteração de modelo (h)</label><input type="number" min="0" step="0.1" data-p="alteracaoModeloHoras" value="${draft.alteracaoModeloHoras}"></div>
-            <div class="field"><label>Projeto personalizado (h)</label><input type="number" min="0" step="0.1" data-p="projetoPersonalizadoHoras" value="${draft.projetoPersonalizadoHoras}"></div>
-            <div class="field"><label>Prototipagem/testes (h)</label><input type="number" min="0" step="0.1" data-p="prototipagemHoras" value="${draft.prototipagemHoras}"></div>
-            <div class="field"><label>Outros serviços (h)</label><input type="number" min="0" step="0.1" data-p="outrosServicosHoras" value="${draft.outrosServicosHoras}"></div>
+            ${fieldDHM("modelagem3dHoras", "Modelagem 3D")}
+            ${fieldDHM("alteracaoModeloHoras", "Alteração de modelo")}
+            ${fieldDHM("projetoPersonalizadoHoras", "Projeto personalizado")}
+            ${fieldDHM("prototipagemHoras", "Prototipagem/testes")}
+            ${fieldDHM("outrosServicosHoras", "Outros serviços")}
             <div class="field"><label>Materiais/serviços extras (R$)</label><input type="number" min="0" step="0.01" data-p="materiaisServicosExtras" value="${draft.materiaisServicosExtras}"></div>
           </div></div>
         <div style="display:flex; gap:10px;">
@@ -1145,7 +1285,9 @@ function viewNovoPedido(){
             <div class="line"><span>Mão de obra (peça)</span><span>${fmtR(r.maoObraPeca)}</span></div>
             <div class="line"><span>Reserva para falhas/reimpressões</span><span>${fmtR(r.custoRisco)}</span></div>
             <div class="line"><span>Acabamento (materiais)</span><span>${fmtR(r.acabamentoMaterial)}</span></div>
-            <div class="line"><span>Embalagem</span><span>${fmtR(r.custoEmbalagem)}</span></div>
+            <div class="line"><span>Embalagem (padrão configurada)</span><span>${fmtR(r.custoEmbalagem)}</span></div>
+            <div class="line"><span>Embalagens (itens escolhidos)</span><span>${fmtR(r.custoEmbalagensItens)}</span></div>
+            <div class="line"><span>Adicionais</span><span>${fmtR(r.custoAdicionaisItens)}</span></div>
             <div class="line"><span>Custos indiretos rateados</span><span>${fmtR(r.custosIndiretos)}</span></div>
             <div class="line"><span>Serviços de projeto/modelagem</span><span>${fmtR(r.custoServicos)}</span></div>
             <div class="line" style="font-weight:700; border-bottom:1px solid var(--ink);"><span>CUSTO TOTAL</span><span>${fmtR(r.custoTotal)}</span></div>
@@ -1256,6 +1398,36 @@ function bindEvents(){
   document.querySelectorAll('[data-del-imp]').forEach(el=>{
     el.onclick = ()=>{ state.impressoras = state.impressoras.filter(i=>i.id!==el.dataset.delImp); queueSync(); render(); };
   });
+  const addEmb = document.getElementById('add-emb');
+  if (addEmb) addEmb.onclick = ()=>{ state.embalagens.push({ id:uid(), nome:'Nova embalagem', valor:0 }); queueSync(); render(); };
+  document.querySelectorAll('[data-emb]').forEach(el=>{
+    el.onchange = ()=>{ const id = el.closest('tr').dataset.id; const e = state.embalagens.find(x=>x.id===id); const k = el.dataset.emb;
+      e[k] = (k==='valor') ? Math.max(0,parseFloat(el.value)||0) : el.value; queueSync(); render(); };
+  });
+  document.querySelectorAll('[data-del-emb]').forEach(el=>{
+    el.onclick = ()=>{ state.embalagens = state.embalagens.filter(e=>e.id!==el.dataset.delEmb); queueSync(); render(); };
+  });
+  const addAdc = document.getElementById('add-adc');
+  if (addAdc) addAdc.onclick = ()=>{ state.adicionais.push({ id:uid(), nome:'Novo adicional', valor:0, tipoCobranca:'unidade' }); queueSync(); render(); };
+  document.querySelectorAll('[data-adc]').forEach(el=>{
+    el.onchange = ()=>{ const id = el.closest('tr').dataset.id; const a = state.adicionais.find(x=>x.id===id); const k = el.dataset.adc;
+      a[k] = (k==='valor') ? Math.max(0,parseFloat(el.value)||0) : el.value; queueSync(); render(); };
+  });
+  document.querySelectorAll('[data-del-adc]').forEach(el=>{
+    el.onclick = ()=>{ state.adicionais = state.adicionais.filter(a=>a.id!==el.dataset.delAdc); queueSync(); render(); };
+  });
+  document.querySelectorAll('[data-dhm]').forEach(el=>{
+    el.onchange = ()=>{
+      const key = el.dataset.dhm;
+      const cur = decompDHM(draft[key]);
+      const v = Math.max(0, parseFloat(el.value)||0);
+      if (el.dataset.dhmU === 'd') cur.dias = v;
+      else if (el.dataset.dhmU === 'h') cur.horas = v;
+      else cur.minutos = v;
+      draft[key] = composeDHM(cur.dias, cur.horas, cur.minutos);
+      render();
+    };
+  });
   document.querySelectorAll('[data-p]').forEach(el=>{
     el.onchange = ()=>{ const k = el.dataset.p;
       const textKeys = ['data','cliente','produto','status','materialId','impressoraId','acabamentoExtraModo','modoTempoAms'];
@@ -1264,6 +1436,34 @@ function bindEvents(){
   });
   document.querySelectorAll('[data-p-bool]').forEach(el=>{
     el.onchange = ()=>{ draft[el.dataset.pBool] = el.checked; render(); };
+  });
+  const addEmbItem = document.getElementById('add-emb-item');
+  if (addEmbItem) addEmbItem.onclick = ()=>{
+    const embalagemId = document.getElementById('add-emb-select').value;
+    const quantidade = Math.max(1, parseFloat(document.getElementById('add-emb-qtd').value)||1);
+    draft.embalagensItens.push({ lineId:uid(), embalagemId, quantidade });
+    render();
+  };
+  document.querySelectorAll('[data-emb-item-qtd]').forEach(el=>{
+    el.onchange = ()=>{ const it = draft.embalagensItens.find(x=>x.lineId===el.dataset.embItemQtd);
+      if (it) it.quantidade = Math.max(1, parseFloat(el.value)||1); render(); };
+  });
+  document.querySelectorAll('[data-del-emb-item]').forEach(el=>{
+    el.onclick = ()=>{ draft.embalagensItens = draft.embalagensItens.filter(x=>x.lineId!==el.dataset.delEmbItem); render(); };
+  });
+  const addAdcItem = document.getElementById('add-adc-item');
+  if (addAdcItem) addAdcItem.onclick = ()=>{
+    const adicionalId = document.getElementById('add-adc-select').value;
+    const quantidade = Math.max(1, parseFloat(document.getElementById('add-adc-qtd').value)||1);
+    draft.adicionaisItens.push({ lineId:uid(), adicionalId, quantidade });
+    render();
+  };
+  document.querySelectorAll('[data-adc-item-qtd]').forEach(el=>{
+    el.onchange = ()=>{ const it = draft.adicionaisItens.find(x=>x.lineId===el.dataset.adcItemQtd);
+      if (it) it.quantidade = Math.max(1, parseFloat(el.value)||1); render(); };
+  });
+  document.querySelectorAll('[data-del-adc-item]').forEach(el=>{
+    el.onclick = ()=>{ draft.adicionaisItens = draft.adicionaisItens.filter(x=>x.lineId!==el.dataset.delAdcItem); render(); };
   });
   const saveBtn = document.getElementById('save-pedido');
   if (saveBtn) saveBtn.onclick = ()=>{
