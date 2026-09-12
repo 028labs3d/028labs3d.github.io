@@ -516,10 +516,15 @@ function computePricing(custoTotal, cfg){
 // Pura: calcula quantas fornadas são necessárias e o tamanho da última fornada.
 // Quando produção em fornadas está desativada (ou quantidade <= 1), cada peça é sua própria "fornada",
 // preservando exatamente o comportamento antigo (tempoImpressao × quantidade).
+// Não é uma função de cálculo nova — só decide, a partir dos MESMOS campos já existentes
+// (producaoPorFornada e pesoModo), se este pedido deve ser tratado em modo fornada.
+// Mantém compatibilidade com pedidos antigos (producaoPorFornada:true) e com o fluxo novo,
+// mais simples, onde a produção em fornadas é ativada só escolhendo "A fornada inteira (mesa)".
+function pedidoUsaFornada(p){ return !!(p.producaoPorFornada || p.pesoModo === 'fornada'); }
 function calcularFornadas(p){
   const quantidade = Math.max(0, Number(p.quantidade) || 0);
 
-  if (quantidade <= 1 || !p.producaoPorFornada) {
+  if (quantidade <= 1 || !pedidoUsaFornada(p)) {
     return {
       quantidade,
       pecasPorFornada: 1,
@@ -552,6 +557,15 @@ function calcularTempoAmsFornada(p){
   return Math.max(0, p.tempoAdicionalAmsFornada || 0);
 }
 function amsCoresValidas(n){ return n >= 1 && n <= 4; }
+// Só formata o texto "N peças → M fornadas (a + a + ... + resto)" a partir do resultado de
+// calcularFornadas() — não recalcula nada, é puramente exibição.
+function resumoFornadas(producao){
+  if (producao.fornadas <= 1) return `${producao.quantidade} peça${producao.quantidade===1?'':'s'} → 1 fornada`;
+  const partes = [];
+  for (let i = 0; i < producao.fornadas - 1; i++) partes.push(producao.pecasPorFornada);
+  partes.push(producao.ultimaFornada);
+  return `${producao.quantidade} peças → ${producao.fornadas} fornadas (${partes.join(' + ')})`;
+}
 
 function calcPedidoCore(p, cfg, mat, imp, embalagensCat, adicionaisCat){
   embalagensCat = embalagensCat || [];
@@ -577,7 +591,7 @@ function calcPedidoCore(p, cfg, mat, imp, embalagensCat, adicionaisCat){
   //   producaoPorFornada = true  -> tempoImpressao = tempo de UMA fornada (várias peças juntas na mesa)
   const tempoAmsFornada = calcularTempoAmsFornada(p);
   const tempoPorFornadaEfetivo = Math.max(0, p.tempoImpressao||0) + tempoAmsFornada;
-  const tempoImpressaoTotal = (p.producaoPorFornada && qtd > 1)
+  const tempoImpressaoTotal = (pedidoUsaFornada(p) && qtd > 1)
     ? tempoPorFornadaEfetivo * producao.fornadas
     : tempoPorFornadaEfetivo * qtd;
 
@@ -675,7 +689,7 @@ function calcPedido(p){
 // de fornadas mudam (tempo de máquina, energia, depreciação, manutenção, trabalhos por fornada);
 // custos por peça e custos gerais do pedido permanecem os mesmos nos dois cenários.
 function calcEconomiaFornada(p, cfg, mat, imp, embalagensCat, adicionaisCat){
-  if (!p.producaoPorFornada || !(p.quantidade > 1) || !(p.tempoImpressao > 0)) return null;
+  if (!pedidoUsaFornada(p) || !(p.quantidade > 1) || !(p.tempoImpressao > 0)) return null;
   const comFornada = calcPedidoCore(p, cfg, mat, imp, embalagensCat, adicionaisCat);
   if (!(comFornada.qtd > 0)) return null;
   if (comFornada.producao.fornadas >= comFornada.qtd) return null; // sem lote real, nada a comparar
@@ -695,7 +709,7 @@ function validatePedidoForSave(p, cfg){
   const errs = [];
   if (!(p.quantidade > 0)) errs.push('Informe uma quantidade maior que zero.');
   if (!(p.peso > 0)) errs.push(p.pesoModo === 'fornada' ? 'Informe o peso da fornada (peso de todas as peças da mesa).' : 'Informe um peso por peça maior que zero.');
-  if (p.producaoPorFornada){
+  if (pedidoUsaFornada(p)){
     if (!(p.tempoImpressao > 0)) errs.push('Informe o tempo de impressão da fornada.');
     if (!(p.pecasPorFornada >= 1)) errs.push('Peças por fornada deve ser pelo menos 1.');
   } else {
@@ -726,7 +740,7 @@ function pedidoWarnings(p){
   const warns = [];
   if (p.quantidade > 0){
     if (!(p.peso > 0)) warns.push(p.pesoModo === 'fornada' ? 'Peso da fornada está zerado — o custo de material não está sendo considerado.' : 'Peso por peça está zerado — o custo de material não está sendo considerado.');
-    if (p.producaoPorFornada){
+    if (pedidoUsaFornada(p)){
       if (!(p.tempoImpressao > 0)) warns.push('Tempo de impressão por fornada está zerado — energia e custo de máquina não estão sendo considerados.');
     } else {
       if (!(p.tempoImpressao > 0)) warns.push('Tempo de impressão por peça está zerado — energia e custo de máquina não estão sendo considerados.');
@@ -961,6 +975,32 @@ function runSelfTests(){
       `pesoTotal = ${r2.pesoTotal.toFixed(0)}g (esperado 400g)`);
   }
 
+  // Teste 21 — exemplo literal: 20 peças, 5/fornada, peso da fornada 100g, tempo da fornada 2h
+  {
+    const cfg = { ...DEFAULT_CONFIG };
+    const mat = { pesoRolo:1000, precoRolo:100 };
+    const p = pedidoTeste({ quantidade:20, producaoPorFornada:true, pecasPorFornada:5, peso:100, pesoModo:'fornada', tempoImpressao:2, materialId:'m' });
+    const r = calcPedidoCore(p, cfg, mat, null);
+    push('Teste 21 — 20 peças / 5 por fornada / peso 100g e tempo 2h da fornada',
+      r.producao.fornadas === 4 && Math.abs(r.pesoTotal - 400) < 0.01 && Math.abs(r.tempoImpressaoTotal - 8) < 0.01,
+      `fornadas=${r.producao.fornadas} (esp. 4), pesoTotal=${r.pesoTotal.toFixed(0)}g (esp. 400g), tempoTotal=${r.tempoImpressaoTotal.toFixed(1)}h (esp. 8h)`);
+  }
+
+  // Teste 22 — economia de escala: mesma quantidade, mais peças por fornada = menos fornadas = menor custo/peça
+  {
+    const cfg = { ...DEFAULT_CONFIG };
+    const mat = { pesoRolo:1000, precoRolo:100 };
+    const imp = { valorAquisicao:3500, vidaUtil:8000, potencia:95, manutencaoMensal:50, horasMes:180 };
+    const pA = pedidoTeste({ quantidade:20, producaoPorFornada:true, pecasPorFornada:5, peso:20, pesoModo:'peca', tempoImpressao:2, materialId:'m' });
+    const pB = pedidoTeste({ quantidade:20, producaoPorFornada:true, pecasPorFornada:10, peso:20, pesoModo:'peca', tempoImpressao:2, materialId:'m' });
+    const rA = calcPedidoCore(pA, cfg, mat, imp); // 4 fornadas
+    const rB = calcPedidoCore(pB, cfg, mat, imp); // 2 fornadas
+    const custoUnitA = rA.custoTotal / 20, custoUnitB = rB.custoTotal / 20;
+    push('Teste 22 — Mais peças por fornada (menos fornadas) reduz o custo por peça',
+      rB.producao.fornadas < rA.producao.fornadas && custoUnitB < custoUnitA,
+      `4 fornadas: R$${custoUnitA.toFixed(2)}/peça vs 2 fornadas: R$${custoUnitB.toFixed(2)}/peça (deve ser menor com menos fornadas)`);
+  }
+
   return out;
 }
 
@@ -1151,8 +1191,11 @@ function viewNovoPedido(){
   const noRes = !state.materiais.length || !state.impressoras.length;
   const precoInvalido = !r.percentuaisValidos;
   const warnings = pedidoWarnings(draft);
-  const mostraFornadas = draft.quantidade > 1;
-  const producaoAtiva = draft.producaoPorFornada && mostraFornadas;
+  // "usaFornada" decide toda a exibição de UI relacionada a fornadas. Compatibilidade: pedidos antigos
+  // que já tinham `producaoPorFornada:true` continuam sendo tratados como produção em fornadas mesmo
+  // que `pesoModo` ainda esteja em 'peca' (não existia esse campo quando foram criados).
+  const usaFornada = pedidoUsaFornada(draft);
+  const producaoAtiva = usaFornada;
   const producaoCalc = calcularFornadas(draft);
 
   const tempoLabel = producaoAtiva ? 'Tempo de impressão por fornada (h)' : 'Tempo de impressão por peça (h)';
@@ -1191,24 +1234,16 @@ function viewNovoPedido(){
                 <option value="peca" ${draft.pesoModo!=='fornada'?'selected':''}>Uma peça</option>
                 <option value="fornada" ${draft.pesoModo==='fornada'?'selected':''}>A fornada inteira (mesa)</option>
               </select></div>
+            ${usaFornada ? `
+            <div class="field"><label>Peças por fornada</label><input type="number" min="1" step="1" data-p="pecasPorFornada" value="${draft.pecasPorFornada}"></div>
+            ` : '<div></div>'}
             <div class="field"><label>Impressora</label><select data-p="impressoraId">${impOpts}</select></div>
             ${fieldDHM("tempoImpressao", tempoLabel)}
           </div>
-          <p class="card-note" style="margin-top:10px;">${pesoDesc} ${tempoDesc} O peso pode ser "de uma peça" ou "da fornada inteira" independentemente de você estar usando produção em fornadas — é só o número que você tem em mãos.</p></div>
-        ${mostraFornadas ? `
-        <div class="card"><h2>Produção em fornadas</h2>
-          <p class="card-note">Produção em fornadas permite colocar várias unidades iguais na mesa ao mesmo tempo. O custo de máquina é calculado pelo número de fornadas e pelo tempo real de impressão, enquanto material, acabamento, montagem e embalagem continuam sendo calculados por peça.</p>
-          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:${draft.producaoPorFornada?'14px':'0'};">
-            <input type="checkbox" data-p-bool="producaoPorFornada" ${draft.producaoPorFornada?'checked':''} style="width:auto;">
-            Produzir várias peças por fornada
-          </label>
-          ${draft.producaoPorFornada ? `
-          <div class="grid">
-            <div class="field"><label>Peças por fornada</label><input type="number" min="1" step="1" data-p="pecasPorFornada" value="${draft.pecasPorFornada}"></div>
-            <div class="field locked"><label>Fornadas necessárias <span class="lock-tag">calc</span></label><input value="${producaoCalc.fornadas}" disabled></div>
-            <div class="field locked"><label>Última fornada <span class="lock-tag">calc</span></label><input value="${producaoCalc.ultimaFornada} peças" disabled></div>
-          </div>` : ''}
-        </div>` : ''}
+          ${usaFornada ? `<p class="card-note" style="margin-top:10px; font-weight:600; color:var(--ink);">${resumoFornadas(producaoCalc)}</p>` : ''}
+          <p class="card-note" style="margin-top:${usaFornada?'4px':'10px'};">${pesoDesc} ${tempoDesc} O peso pode ser "de uma peça" ou "da fornada inteira" — é só o número que você tem em mãos no Bambu Studio.</p>
+          ${usaFornada ? `<p class="card-note" style="margin-top:4px;">Peso total: <strong>${r.pesoTotal.toFixed(0)} g</strong> · Tempo total de impressão: <strong>${r.tempoImpressaoTotal.toFixed(2)}h</strong></p>` : ''}
+        </div>
         <div class="card"><h2>Embalagens</h2>
           <p class="card-note">Escolha as embalagens usadas neste orçamento e a quantidade de cada uma.</p>
           ${state.embalagens.length ? `
@@ -1334,8 +1369,8 @@ function viewNovoPedido(){
             ${draft.usarAmsLite ? `<div class="line"><span>AMS Lite</span><span>${draft.quantidadeCores} cores</span></div>` : ''}
           </div>` : ''}
           <div class="result-strip">
-            <div class="result-cell"><div class="k">CUSTO TOTAL REAL</div><div class="v">${fmtR(r.custoTotal)}</div></div>
-            <div class="result-cell hero"><div class="k">PREÇO RECOMENDADO</div><div class="v">${fmtR(r.recomendado.preco)}</div></div>
+            <div class="result-cell hero"><div class="k">PREÇO UNITÁRIO — o que cobrar por peça</div><div class="v">${fmtR(r.precoUnitario)} <span style="font-size:13px; font-weight:400;">/ peça</span></div></div>
+            <div class="result-cell"><div class="k">TOTAL DO PEDIDO (${r.qtd} peça${r.qtd===1?'':'s'})</div><div class="v">${fmtR(r.recomendado.preco)}</div></div>
           </div>
           <div class="breakdown">
             <div class="line"><span>Material</span><span>${fmtR(r.custoMaterial)}</span></div>
@@ -1359,13 +1394,14 @@ function viewNovoPedido(){
             <div class="line"><span>Markup</span><span>${fmtP(r.recomendado.markup)}</span></div>
           </div>
           <div class="breakdown" style="margin-top:10px;">
-            <div class="line"><span>Preço promocional</span><span>${fmtR(r.promocional.preco)}</span></div>
+            <div class="line"><span>Preço promocional (total)</span><span>${fmtR(r.promocional.preco)}</span></div>
+            <div class="line"><span>Preço promocional / peça</span><span>${fmtR(r.qtd>0 ? r.promocional.preco/r.qtd : 0)}</span></div>
             <div class="line"><span>Margem promocional</span><span>${fmtP(r.promocional.margemReal)}</span></div>
             ${alertaAbaixoMinimo(r.promocional)}
-            <div class="line" style="margin-top:6px;"><span>Preço atacado</span><span>${fmtR(r.atacado.preco)}</span></div>
+            <div class="line" style="margin-top:6px;"><span>Preço atacado (total)</span><span>${fmtR(r.atacado.preco)}</span></div>
+            <div class="line"><span>Preço atacado / peça</span><span>${fmtR(r.qtd>0 ? r.atacado.preco/r.qtd : 0)}</span></div>
             <div class="line"><span>Margem atacado</span><span>${fmtP(r.atacado.margemReal)}</span></div>
             ${alertaAbaixoMinimo(r.atacado)}
-            <div class="line" style="margin-top:6px; font-weight:700;"><span>Preço unitário</span><span>${fmtR(r.precoUnitario)}</span></div>
           </div>
           ${economia ? `
           <div class="breakdown" style="margin-top:10px;">
@@ -1494,6 +1530,8 @@ function bindEvents(){
     el.onchange = ()=>{ const k = el.dataset.p;
       const textKeys = ['data','cliente','produto','status','materialId','impressoraId','acabamentoExtraModo','modoTempoAms','pesoModo'];
       draft[k] = textKeys.includes(k) ? el.value : Math.max(0, parseFloat(el.value)||0);
+      // "Esse peso é de" decide sozinho se o pedido está em modo fornada — sem checkbox separado.
+      if (k === 'pesoModo') draft.producaoPorFornada = (el.value === 'fornada');
       render(); };
   });
   document.querySelectorAll('[data-p-bool]').forEach(el=>{
