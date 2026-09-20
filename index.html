@@ -1013,6 +1013,22 @@ function runSelfTests(){
 
 
 const fmtR = n => (isFinite(n)?n:0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
+const fmtData = iso => iso ? new Date(iso+'T00:00:00').toLocaleDateString('pt-BR') : '';
+function opcaoMaterial(m){
+  let label = `${m.nome}${m.marca?` (${m.marca})`:''} — ${fmtR(precoGrama(m))}/g`;
+  if (m.fornecedor) label += ` · ${m.fornecedor}`;
+  if (m.dataUltimaCompra) label += ` · ${fmtData(m.dataUltimaCompra)}`;
+  return label;
+}
+function fichaMaterial(m){
+  if (!m) return '';
+  const hist = m.historico||[];
+  return `<div class="card-note" style="margin-top:8px; padding:10px 12px; background:var(--locked-bg); border-radius:8px;">
+    <strong>${m.nome}${m.marca?` (${m.marca})`:''}</strong> — ${fmtR(precoGrama(m))}/g
+    <div style="margin-top:4px;">Fornecedor atual: ${m.fornecedor||'—'} ${m.dataUltimaCompra?`· última compra em ${fmtData(m.dataUltimaCompra)}`:''}</div>
+    ${hist.length ? `<div style="margin-top:6px;">Histórico anterior: ${hist.map(h=>`${fmtR(h.precoRolo||0)}${h.data?` em ${fmtData(h.data)}`:''}${h.fornecedor?` (${h.fornecedor})`:''}`).join(' · ')}</div>` : `<div style="margin-top:6px; color:var(--ink-soft);">Sem compras anteriores registradas.</div>`}
+  </div>`;
+}
 const fmtP = n => ((isFinite(n)?n:0)*100).toLocaleString('pt-BR',{minimumFractionDigits:1,maximumFractionDigits:1})+'%';
 const STATUS = ['Orçamento','Aprovado','Em produção','Finalizado','Entregue','Cancelado'];
 const statusClass = { 'Orçamento':'orc','Aprovado':'apr','Em produção':'prod','Finalizado':'fin','Entregue':'ent','Cancelado':'can' };
@@ -1179,7 +1195,8 @@ function compraDraftPadrao(m){
 function viewMateriais(){
   if (compraDraft===null) compraDraft = compraDraftPadrao(null);
   const ehNovo = compraSelecionada==='' || compraSelecionada==='__novo__';
-  const matOptsCompra = state.materiais.map(m=>`<option value="${m.id}" ${m.id===compraSelecionada?'selected':''}>${m.nome}${m.marca?` (${m.marca})`:''}</option>`).join('');
+  const matOptsCompra = state.materiais.map(m=>`<option value="${m.id}" ${m.id===compraSelecionada?'selected':''}>${opcaoMaterial(m)}</option>`).join('');
+  const materialEmFoco = ehNovo ? null : state.materiais.find(m=>m.id===compraSelecionada);
 
   const rows = state.materiais.map(m => `<tr data-id="${m.id}">
       <td><input data-mat="nome" value="${m.nome}" style="min-width:120px"></td>
@@ -1202,6 +1219,7 @@ function viewMateriais(){
             ${matOptsCompra}
           </select></div>
       </div>
+      ${materialEmFoco ? fichaMaterial(materialEmFoco) : ''}
       <div class="grid" style="margin-top:14px;">
         <div class="field"><label>Nome ${!ehNovo?'<span class="lock-tag">do cadastro</span>':''}</label><input id="compra-nome" value="${compraDraft.nome}" ${!ehNovo?'disabled':''}></div>
         <div class="field"><label>Marca ${!ehNovo?'<span class="lock-tag">do cadastro</span>':''}</label><input id="compra-marca" value="${compraDraft.marca}" ${!ehNovo?'disabled':''}></div>
