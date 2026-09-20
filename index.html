@@ -137,6 +137,17 @@
   details.subdetails > div{padding:14px;}
   .add-item-row{display:flex; gap:8px; margin-bottom:14px; align-items:flex-end;}
   tr.row-selected td{background:var(--accent-soft);}
+  .fornadas-lista{margin-top:10px;}
+  .passos-flow{display:flex; gap:6px; flex-wrap:wrap; margin:0 0 18px;}
+  .passo-badge{font-size:11px; padding:4px 11px; border-radius:20px; background:var(--locked-bg); color:var(--ink-soft); font-weight:600;}
+  .passo-badge.feito{background:var(--accent-soft); color:var(--accent-dark);}
+  .area-eyebrow{font-size:10px; font-weight:800; letter-spacing:.08em; color:var(--accent);}
+  .fornada-card{border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-top:8px; background:var(--panel);}
+  .fornada-card.fornada-parcial{border-color:var(--accent); border-style:dashed;}
+  .fornada-card-head{display:flex; justify-content:space-between; align-items:center; font-size:13px; font-weight:700;}
+  .fornada-card-body{margin-top:6px; font-size:12.5px; color:var(--ink-soft);}
+  .badge-estimativa{font-size:9px; background:var(--accent-soft); color:var(--accent-dark); padding:1px 6px; border-radius:3px; font-weight:700; letter-spacing:.03em;}
+  .badge-confirmado{font-size:9px; background:#dcefe1; color:var(--ok); padding:1px 6px; border-radius:3px; font-weight:700; letter-spacing:.03em;}
   .mobile-nav{display:none; position:fixed; left:0; right:0; bottom:0; background:#1c1b19; border-top:1px solid #33312c; z-index:55; padding:6px 4px calc(6px + env(safe-area-inset-bottom,0px));}
   .mnav-btn{all:unset; cursor:pointer; flex:1; display:flex; flex-direction:column; align-items:center; gap:2px; padding:6px 2px; color:#93908a; font-size:10px; border-radius:8px; text-align:center;}
   .mnav-btn .mnav-ic{font-size:17px; line-height:1;}
@@ -180,6 +191,7 @@
     .two-col .result-col{order:-1;}
     .result-panel{position:static;}
     .mobile-nav{display:flex;}
+    .card > table{display:block; overflow-x:auto; -webkit-overflow-scrolling:touch;}
   }
   @media (max-width:480px){
     .add-item-row{flex-direction:column; align-items:stretch;}
@@ -378,11 +390,15 @@ function migratePedido(p){
     capacidadeFornada: p.capacidadeFornada ?? 0,
     tempoFornadaParcial: p.tempoFornadaParcial ?? 0,
     pesoFornadaParcialOverride: p.pesoFornadaParcialOverride ?? 0,
+    completarFornada: p.completarFornada ?? false,
+    modoProducao: p.modoProducao ?? 'sobDemanda',
     // Mão de obra virou um valor fixo por pedido — pedidos antigos, que detalhavam tempos por
     // lote/fornada/peça, não têm mais esse detalhamento recalculado; caem em R$0 e podem ser
     // ajustados manualmente se o pedido for reaberto (orçamentos antigos não precisam bater
     // com o valor exato de quando foram feitos).
     maoObraValor: p.maoObraValor ?? 0,
+    descontoComercial: p.descontoComercial ?? 0,
+    observacoes: p.observacoes ?? '',
     // embalagens e adicionais escolhidos neste orçamento (itens do catálogo único "Extras" + quantidade)
     extrasItens: Array.isArray(p.extrasItens) ? p.extrasItens
       : [...(Array.isArray(p.embalagensItens)?p.embalagensItens:[]).map(it=>({ lineId:it.lineId, extraId:it.embalagemId, quantidade:it.quantidade })),
@@ -632,16 +648,48 @@ function computePricing(custoTotal, cfg){
   return { precoMinimo, recomendado, promocional, atacado, percentuaisValidos };
 }
 
+// Gera a lista individual de fornadas (Prioridade 1 do documento de spec): cada fornada cheia
+// vira um item da lista; se sobrar resto, vira uma fornada PARCIAL (editável) — a menos que
+// "completarFornada" esteja marcado, caso em que essa última fornada também é tratada como
+// cheia (produção extra vira excedente/estoque, sem alterar a quantidade comercial do pedido).
 function calcularProducaoLote(p){
-  // Sem modo lote (padrão): não existe "fornada" — cada peso/tempo informado já é o total do pedido.
   if (!p.usaLote || !(p.capacidadeFornada > 0)){
-    return { usaLote:false, numFornadasCheias:0, restante:0, capacidade:0 };
+    return { usaLote:false, modo:'semLote', fornadas:[], producaoTotal:0, excedente:0, numFornadasCheias:0, restante:0, capacidade:0, completar:false, participacaoTotal:0, participacaoPct:0, fornadasCompletas:0, pecasResiduais:0 };
   }
   const qtd = Math.max(0, p.quantidade||0);
   const capacidade = Math.max(1, Math.floor(p.capacidadeFornada));
+
+  if (p.modoProducao === 'compartilhado'){
+    // Rateio de uma fornada já existente/planejada pra outros fins: este pedido não gera uma fornada
+    // nova — ele toma uma fatia proporcional (participação) da fornada cheia (capacidade peças) já
+    // conhecida. Nunca cobra o custo integral da fornada, nunca cria "fornada parcial" própria, e o
+    // recurso de "completar fornada" não se aplica aqui (não há produção nova sendo decidida).
+    // Quando o pedido rateado é MAIOR que uma fornada só (ex.: 25 peças rateadas de fornadas de 10),
+    // a participação vira múltiplos inteiros de fornada + uma fração residual — nunca um percentual
+    // "escondido" acima de 100% sem explicação: fornadasCompletas e pecasResiduais deixam isso claro
+    // pra interface montar "2 fornadas completas + 5 peças da 3ª", em vez de só um número solto.
+    const fornadasCompletas = Math.floor(qtd / capacidade);
+    const pecasResiduais = qtd % capacidade;
+    const fracaoResidual = capacidade>0 ? pecasResiduais/capacidade : 0;
+    const participacaoTotal = fornadasCompletas + fracaoResidual; // fração TOTAL usada no cálculo de custo (pode passar de 100%)
+    const participacaoPct = capacidade>0 ? Math.min(1, qtd/capacidade) : 0; // só a fração de UMA fornada — usado quando cabe numa fornada só (fornadasCompletas===0)
+    return { usaLote:true, modo:'compartilhado', fornadas:[], producaoTotal:qtd, excedente:0,
+      numFornadasCheias:0, restante:0, capacidade, completar:false, participacaoTotal, participacaoPct, fornadasCompletas, pecasResiduais };
+  }
+
+  // modo 'sobDemanda' (padrão) — lógica existente preservada integralmente.
   const numFornadasCheias = Math.floor(qtd / capacidade);
   const restante = qtd % capacidade;
-  return { usaLote:true, numFornadasCheias, restante, capacidade };
+  const completar = !!p.completarFornada && restante > 0;
+
+  const fornadas = [];
+  for (let i=0; i<numFornadasCheias; i++) fornadas.push({ numero: i+1, unidades: capacidade, tipo:'cheia' });
+  if (restante > 0){
+    if (completar) fornadas.push({ numero: numFornadasCheias+1, unidades: capacidade, tipo:'cheia', completada:true });
+    else fornadas.push({ numero: numFornadasCheias+1, unidades: restante, tipo:'parcial' });
+  }
+  const producaoTotal = fornadas.reduce((s,f)=>s+f.unidades, 0);
+  return { usaLote:true, modo:'sobDemanda', fornadas, producaoTotal, excedente: producaoTotal-qtd, numFornadasCheias, restante, capacidade, completar, participacaoTotal:0, participacaoPct:0, fornadasCompletas:0, pecasResiduais:0 };
 }
 function calcPedidoCore(p, cfg, mat, imp, extrasCat, canaisCat, materiaisCat){
   extrasCat = extrasCat || [];
@@ -675,15 +723,9 @@ function calcPedidoCore(p, cfg, mat, imp, extrasCat, canaisCat, materiaisCat){
     });
     tempoImpressaoTotal = Math.max(0, p.tempoImpressao||0);
   } else {
-    // Com lote: o peso de cada item e o tempo informados são de UMA FORNADA CHEIA (capacidade
-    // peças). O pedido pode precisar de várias fornadas cheias + uma fornada menor no final (ou
-    // só uma fornada menor, se a quantidade pedida for menor que a capacidade — caso do rateio:
-    // você já produziu uma fornada cheia e está cobrando só a fatia de um cliente).
-    // A fornada menor não escala necessariamente na mesma proporção da cheia (purga, brim,
-    // aquecimento etc. não caem proporcionalmente) — por isso, se você tiver o peso/tempo REAIS
-    // dessa fornada menor (por ter fatiado ela separadamente), informe-os; do contrário, o app
-    // estima proporcionalmente a partir da fornada cheia.
-    const { numFornadasCheias, restante, capacidade } = producaoLote;
+    // Com lote: o peso de cada item e o tempo informados são sempre os de UMA FORNADA CHEIA
+    // (capacidade peças) — a referência é a mesma nos dois modos de produção; o que muda é como
+    // o pedido consome essa referência.
     let pesoFornadaCheiaTotal = 0;
     const detalheFornadaCheia = itensMaterial.map(it => {
       const matItem = (it.lineId === 'legacy') ? mat : materiaisCat.find(m => m.id === it.materialId);
@@ -696,22 +738,48 @@ function calcPedidoCore(p, cfg, mat, imp, extrasCat, canaisCat, materiaisCat){
     const tempoFornadaCheia = Math.max(0, p.tempoImpressao||0);
     const precoMedioGramaFornada = pesoFornadaCheiaTotal>0 ? custoMaterialFornadaCheia/pesoFornadaCheiaTotal : 0;
 
-    const temParcial = restante > 0;
-    const pesoParcial = temParcial ? (p.pesoFornadaParcialOverride>0 ? p.pesoFornadaParcialOverride : pesoFornadaCheiaTotal * (restante/capacidade)) : 0;
-    const tempoParcial = temParcial ? (p.tempoFornadaParcial>0 ? p.tempoFornadaParcial : tempoFornadaCheia * (restante/capacidade)) : 0;
-    const custoMaterialParcial = pesoParcial * precoMedioGramaFornada;
+    if (producaoLote.modo === 'compartilhado'){
+      // Rateio: este pedido é só uma FATIA (participacaoTotal) da fornada cheia já existente — não
+      // cria fornada nova, não cobra o peso/tempo integral, não usa fornada parcial nem completar.
+      const participacao = producaoLote.participacaoTotal;
+      pesoTotal = pesoFornadaCheiaTotal * participacao;
+      tempoImpressaoTotal = tempoFornadaCheia * participacao;
+      custoMaterial = custoMaterialFornadaCheia * participacao;
+      detalheMateriaisItens = detalheFornadaCheia.map(d => ({
+        lineId: d.lineId, materialId: d.materialId, pesoTotalItem: d.pesoItem*participacao,
+        precoGrama: d.precoGrama, custoItem: d.pesoItem*participacao*d.precoGrama, nome: d.nome
+      }));
+    } else {
+      // sobDemanda: fornadas cheias usam os valores da fornada cheia; a fornada parcial usa o valor
+      // REAL informado pelo usuário se houver (pesoFornadaParcialOverride/tempoFornadaParcial), senão
+      // uma ESTIMATIVA proporcional — a purga/brim/aquecimento não caem necessariamente na mesma
+      // proporção, por isso a estimativa é só um ponto de partida, substituível pelos números reais.
+      const { capacidade } = producaoLote;
+      producaoLote.fornadas = producaoLote.fornadas.map(f => {
+        if (f.tipo === 'cheia'){
+          return { ...f, peso: pesoFornadaCheiaTotal, tempo: tempoFornadaCheia, custo: custoMaterialFornadaCheia, estimado:false };
+        }
+        const fracao = capacidade>0 ? (f.unidades/capacidade) : 0;
+        const temOverridePeso = p.pesoFornadaParcialOverride>0;
+        const temOverrideTempo = p.tempoFornadaParcial>0;
+        const peso = temOverridePeso ? p.pesoFornadaParcialOverride : pesoFornadaCheiaTotal*fracao;
+        const tempo = temOverrideTempo ? p.tempoFornadaParcial : tempoFornadaCheia*fracao;
+        return { ...f, peso, tempo, custo: peso*precoMedioGramaFornada, estimado: !(temOverridePeso && temOverrideTempo) };
+      });
 
-    pesoTotal = pesoFornadaCheiaTotal*numFornadasCheias + pesoParcial;
-    tempoImpressaoTotal = tempoFornadaCheia*numFornadasCheias + tempoParcial;
-    custoMaterial = custoMaterialFornadaCheia*numFornadasCheias + custoMaterialParcial;
+      pesoTotal = producaoLote.fornadas.reduce((s,f)=>s+f.peso, 0);
+      tempoImpressaoTotal = producaoLote.fornadas.reduce((s,f)=>s+f.tempo, 0);
+      custoMaterial = producaoLote.fornadas.reduce((s,f)=>s+f.custo, 0);
 
-    // Detalhamento por filamento: fornadas cheias contam o peso real; a fatia da fornada parcial
-    // é distribuída entre os filamentos na mesma proporção da mistura da fornada cheia.
-    detalheMateriaisItens = detalheFornadaCheia.map(d => {
-      const parcialItem = pesoFornadaCheiaTotal>0 ? pesoParcial * (d.pesoItem/pesoFornadaCheiaTotal) : 0;
-      const pesoTotalItem = d.pesoItem*numFornadasCheias + parcialItem;
-      return { lineId: d.lineId, materialId: d.materialId, pesoTotalItem, precoGrama: d.precoGrama, custoItem: pesoTotalItem*d.precoGrama, nome: d.nome };
-    });
+      // Detalhamento por filamento: cada fornada cheia conta o peso real; a fatia de cada fornada
+      // (inclusive a parcial) é distribuída entre os filamentos na mesma proporção da fornada cheia.
+      detalheMateriaisItens = detalheFornadaCheia.map(d => {
+        const pesoTotalItem = pesoFornadaCheiaTotal>0
+          ? producaoLote.fornadas.reduce((s,f)=> s + f.peso*(d.pesoItem/pesoFornadaCheiaTotal), 0)
+          : 0;
+        return { lineId: d.lineId, materialId: d.materialId, pesoTotalItem, precoGrama: d.precoGrama, custoItem: pesoTotalItem*d.precoGrama, nome: d.nome };
+      });
+    }
   }
 
   // ---- custos diretos ----
@@ -1009,6 +1077,149 @@ function runSelfTests(){
       `pesoTotal=${r.pesoTotal}g (esp. 80g), tempoTotal=${r.tempoImpressaoTotal}h (esp. 2h)`);
   }
 
+  // Teste 17 — lista de fornadas: pedido 20 / capacidade 10 / fornada 100g,2h -> 2 fornadas cheias, 200g, 4h
+  {
+    const cfg = { ...DEFAULT_CONFIG };
+    const materiaisCat = [{ id:'m1', pesoRolo:1000, precoRolo:100 }];
+    const p = pedidoTeste({ quantidade:20, usaLote:true, capacidadeFornada:10, tempoImpressao:2,
+      materiaisItens:[{ lineId:'a', materialId:'m1', peso:100 }] });
+    const r = calcPedidoCore(p, cfg, null, null, [], [], materiaisCat);
+    push('Teste 17 — 20 peças / fornada de 10 (100g,2h) = 2 fornadas cheias, 200g, 4h',
+      r.producaoLote.fornadas.length===2 && r.pesoTotal===200 && r.tempoImpressaoTotal===4,
+      `fornadas=${r.producaoLote.fornadas.length}, peso=${r.pesoTotal}g, tempo=${r.tempoImpressaoTotal}h`);
+  }
+
+  // Teste 18 — fornada parcial: estimativa proporcional por padrão, valores reais têm prioridade quando informados
+  {
+    const cfg = { ...DEFAULT_CONFIG };
+    const materiaisCat = [{ id:'m1', pesoRolo:1000, precoRolo:100 }];
+    const pEstimado = pedidoTeste({ quantidade:25, usaLote:true, capacidadeFornada:10, tempoImpressao:2,
+      materiaisItens:[{ lineId:'a', materialId:'m1', peso:120 }] });
+    const rEstimado = calcPedidoCore(pEstimado, cfg, null, null, [], [], materiaisCat);
+    const parcialEst = rEstimado.producaoLote.fornadas.find(f=>f.tipo==='parcial');
+    push('Teste 18a — Fornada parcial sem override: estimativa proporcional (60g/1h) marcada como estimada',
+      Math.abs(parcialEst.peso-60)<0.01 && Math.abs(parcialEst.tempo-1)<0.01 && parcialEst.estimado===true,
+      `peso=${parcialEst.peso}g, tempo=${parcialEst.tempo}h, estimado=${parcialEst.estimado}`);
+
+    const pReal = pedidoTeste({ quantidade:25, usaLote:true, capacidadeFornada:10, tempoImpressao:2,
+      materiaisItens:[{ lineId:'a', materialId:'m1', peso:120 }], pesoFornadaParcialOverride:70, tempoFornadaParcial:1+20/60 });
+    const rReal = calcPedidoCore(pReal, cfg, null, null, [], [], materiaisCat);
+    push('Teste 18b — Fornada parcial com valores reais (70g/1h20): total final 310g/5h20, não a estimativa',
+      Math.abs(rReal.pesoTotal-310)<0.01 && Math.abs(rReal.tempoImpressaoTotal-(5+20/60))<0.01,
+      `pesoTotal=${rReal.pesoTotal.toFixed(1)}g, tempoTotal=${rReal.tempoImpressaoTotal.toFixed(2)}h`);
+  }
+
+  // Teste 19 — completar fornada: produção real 30, quantidade comercial continua 25, excedente 5
+  {
+    const cfg = { ...DEFAULT_CONFIG };
+    const materiaisCat = [{ id:'m1', pesoRolo:1000, precoRolo:100 }];
+    const p = pedidoTeste({ quantidade:25, usaLote:true, capacidadeFornada:10, tempoImpressao:2, completarFornada:true,
+      materiaisItens:[{ lineId:'a', materialId:'m1', peso:120 }] });
+    const r = calcPedidoCore(p, cfg, null, null, [], [], materiaisCat);
+    push('Teste 19 — Completar fornada: produção 30, pedido comercial 25, excedente 5, preço/peça sobre 25',
+      r.producaoLote.producaoTotal===30 && r.producaoLote.excedente===5 && r.qtd===25,
+      `produção=${r.producaoLote.producaoTotal}, excedente=${r.producaoLote.excedente}, qtd comercial=${r.qtd}`);
+  }
+
+  // Teste 20 — modoProducao 'compartilhado': rateio de fornada existente, sem criar fornada nova
+  {
+    const cfg = { ...DEFAULT_CONFIG };
+    const materiaisCat = [{ id:'m1', pesoRolo:1000, precoRolo:100 }];
+    const p = pedidoTeste({ quantidade:5, usaLote:true, capacidadeFornada:15, modoProducao:'compartilhado', tempoImpressao:14+32/60,
+      materiaisItens:[{ lineId:'a', materialId:'m1', peso:290 }] });
+    const r = calcPedidoCore(p, cfg, null, null, [], [], materiaisCat);
+    push('Teste 20 — Rateio (5 de 15 = 33,33%): sem fornada nova, peso/tempo proporcionais, quantidade comercial preservada',
+      r.producaoLote.modo==='compartilhado' && r.producaoLote.fornadas.length===0 && Math.abs(r.producaoLote.participacaoPct-1/3)<0.001
+        && Math.abs(r.pesoTotal-290/3)<0.01 && r.qtd===5,
+      `modo=${r.producaoLote.modo}, fornadasNovas=${r.producaoLote.fornadas.length}, participação=${(r.producaoLote.participacaoPct*100).toFixed(2)}%, peso=${r.pesoTotal.toFixed(2)}g, qtd=${r.qtd}`);
+  }
+
+  // Teste 21 — modoProducao efetivamente muda o comportamento (estrutura de fornadas diferente,
+  // mesmo quando o resultado numérico coincide no caso simples sem override)
+  {
+    const cfg = { ...DEFAULT_CONFIG };
+    const materiaisCat = [{ id:'m1', pesoRolo:1000, precoRolo:100 }];
+    const base = { quantidade:5, usaLote:true, capacidadeFornada:20, tempoImpressao:10, materiaisItens:[{ lineId:'a', materialId:'m1', peso:200 }] };
+    const rSobDemanda = calcPedidoCore(pedidoTeste({ ...base, modoProducao:'sobDemanda' }), cfg, null, null, [], [], materiaisCat);
+    const rCompartilhado = calcPedidoCore(pedidoTeste({ ...base, modoProducao:'compartilhado' }), cfg, null, null, [], [], materiaisCat);
+    push('Teste 21 — modoProducao muda a estrutura do cálculo (fornada nova vs. rateio de existente)',
+      rSobDemanda.producaoLote.modo==='sobDemanda' && rSobDemanda.producaoLote.fornadas.length===1
+        && rCompartilhado.producaoLote.modo==='compartilhado' && rCompartilhado.producaoLote.fornadas.length===0,
+      `sobDemanda: modo=${rSobDemanda.producaoLote.modo}, fornadas=${rSobDemanda.producaoLote.fornadas.length} | compartilhado: modo=${rCompartilhado.producaoLote.modo}, fornadas=${rCompartilhado.producaoLote.fornadas.length}`);
+  }
+
+  // Teste 22 — rateio nunca cobra o custo integral da fornada de referência
+  {
+    const cfg = { ...DEFAULT_CONFIG };
+    const materiaisCat = [{ id:'m1', pesoRolo:1000, precoRolo:100 }];
+    const imp = { valorAquisicao:3000, vidaUtil:8000, potencia:100, manutencaoMensal:50, horasMes:150 };
+    const pCheia = pedidoTeste({ quantidade:15, usaLote:true, capacidadeFornada:15, modoProducao:'sobDemanda', tempoImpressao:14+32/60, materiaisItens:[{ lineId:'a', materialId:'m1', peso:290 }] });
+    const rCheia = calcPedidoCore(pCheia, cfg, null, imp, [], [], materiaisCat);
+    const pRateio = pedidoTeste({ quantidade:5, usaLote:true, capacidadeFornada:15, modoProducao:'compartilhado', tempoImpressao:14+32/60, materiaisItens:[{ lineId:'a', materialId:'m1', peso:290 }] });
+    const rRateio = calcPedidoCore(pRateio, cfg, null, imp, [], [], materiaisCat);
+    const custoIntegral = rCheia.custoMaterial + rCheia.custoEnergia + rCheia.custoMaquina;
+    const custoRateio = rRateio.custoMaterial + rRateio.custoEnergia + rRateio.custoMaquina;
+    push('Teste 22 — Custo do rateio (5 de 15) ≈ 1/3 do custo integral da fornada, nunca o custo cheio',
+      Math.abs(custoRateio - custoIntegral/3) < 0.05,
+      `custo integral=R$${custoIntegral.toFixed(2)}, custo rateado=R$${custoRateio.toFixed(2)} (esperado ~R$${(custoIntegral/3).toFixed(2)})`);
+  }
+
+  // Teste 23 — rateio maior que uma fornada: 20/10 = 2 fornadas completas (200%), sem resto
+  {
+    const cfg = { ...DEFAULT_CONFIG };
+    const materiaisCat = [{ id:'m1', pesoRolo:1000, precoRolo:100 }];
+    const p = pedidoTeste({ quantidade:20, usaLote:true, capacidadeFornada:10, modoProducao:'compartilhado', tempoImpressao:2,
+      materiaisItens:[{ lineId:'a', materialId:'m1', peso:100 }] });
+    const r = calcPedidoCore(p, cfg, null, null, [], [], materiaisCat);
+    push('Teste 23 — Rateio 20/10: 2 fornadas completas (200%), peso 200g, tempo 4h — nunca uma fornada só com 200%',
+      r.producaoLote.fornadasCompletas===2 && r.producaoLote.pecasResiduais===0 && r.producaoLote.participacaoTotal===2
+        && r.pesoTotal===200 && r.tempoImpressaoTotal===4,
+      `fornadasCompletas=${r.producaoLote.fornadasCompletas}, pecasResiduais=${r.producaoLote.pecasResiduais}, participação=${(r.producaoLote.participacaoTotal*100)}%, peso=${r.pesoTotal}g, tempo=${r.tempoImpressaoTotal}h`);
+  }
+
+  // Teste 24 — rateio 25/10: 2 fornadas completas + 5 peças residuais (250%), representado corretamente
+  {
+    const cfg = { ...DEFAULT_CONFIG };
+    const materiaisCat = [{ id:'m1', pesoRolo:1000, precoRolo:100 }];
+    const p = pedidoTeste({ quantidade:25, usaLote:true, capacidadeFornada:10, modoProducao:'compartilhado', tempoImpressao:2,
+      materiaisItens:[{ lineId:'a', materialId:'m1', peso:100 }] });
+    const r = calcPedidoCore(p, cfg, null, null, [], [], materiaisCat);
+    push('Teste 24 — Rateio 25/10: 2 fornadas completas + 5 peças residuais (250%), peso 250g, tempo 5h',
+      r.producaoLote.fornadasCompletas===2 && r.producaoLote.pecasResiduais===5 && r.producaoLote.participacaoTotal===2.5
+        && r.pesoTotal===250 && r.tempoImpressaoTotal===5,
+      `fornadasCompletas=${r.producaoLote.fornadasCompletas}, pecasResiduais=${r.producaoLote.pecasResiduais}, participação=${(r.producaoLote.participacaoTotal*100)}%, peso=${r.pesoTotal}g, tempo=${r.tempoImpressaoTotal}h`);
+  }
+
+  // Teste 25 — conservação de custo: rateios que somam uma fornada cheia (10/10) custam exatamente
+  // o mesmo que a fornada cheia (5/10 + 5/10 = 10/10) — nunca duplicado, nunca perdido
+  {
+    const cfg = { ...DEFAULT_CONFIG };
+    const materiaisCat = [{ id:'m1', pesoRolo:1000, precoRolo:100 }];
+    const imp = { valorAquisicao:3000, vidaUtil:8000, potencia:100, manutencaoMensal:50, horasMes:150 };
+    const rateio = (qtd) => calcPedidoCore(
+      pedidoTeste({ quantidade:qtd, usaLote:true, capacidadeFornada:10, modoProducao:'compartilhado', tempoImpressao:2, materiaisItens:[{ lineId:'a', materialId:'m1', peso:100 }] }),
+      cfg, null, imp, [], [], materiaisCat
+    );
+    const custoProdutivo = r => r.custoMaterial + r.custoEnergia + r.custoMaquina;
+    const custoCheia = custoProdutivo(rateio(10));
+    const custoSoma = custoProdutivo(rateio(5)) + custoProdutivo(rateio(5));
+    push('Teste 25 — Conservação de custo: 5/10 + 5/10 ratados separadamente = custo de uma fornada cheia (10/10), sem duplicar',
+      Math.abs(custoCheia - custoSoma) < 0.001,
+      `custo fornada cheia=R$${custoCheia.toFixed(4)}, soma de dois rateios de 5=R$${custoSoma.toFixed(4)}`);
+  }
+
+  // Teste 26 — modo sob demanda 25/10 não é afetado pela lógica de rateio (continua 10+10+5)
+  {
+    const cfg = { ...DEFAULT_CONFIG };
+    const materiaisCat = [{ id:'m1', pesoRolo:1000, precoRolo:100 }];
+    const p = pedidoTeste({ quantidade:25, usaLote:true, capacidadeFornada:10, modoProducao:'sobDemanda', tempoImpressao:2,
+      materiaisItens:[{ lineId:'a', materialId:'m1', peso:100 }] });
+    const r = calcPedidoCore(p, cfg, null, null, [], [], materiaisCat);
+    push('Teste 26 — Sob demanda 25/10 continua 10+10+5 (lógica antiga intacta, sem interferência do rateio)',
+      JSON.stringify(r.producaoLote.fornadas.map(f=>f.unidades)) === JSON.stringify([10,10,5]),
+      `fornadas=${JSON.stringify(r.producaoLote.fornadas.map(f=>f.unidades))} (esperado [10,10,5])`);
+  }
+
   return out;
 }
 
@@ -1048,6 +1259,17 @@ function gerarPdfPedido(p){
   const area = document.getElementById('pdf-print-area');
   if (!area) return;
   const dataFmt = p.data ? new Date(p.data+'T00:00:00').toLocaleDateString('pt-BR') : '—';
+  let validadeFmt = '';
+  if (p.data){
+    const d = new Date(p.data+'T00:00:00');
+    d.setDate(d.getDate()+7);
+    validadeFmt = d.toLocaleDateString('pt-BR');
+  }
+  const desconto = Math.max(0, p.descontoComercial||0);
+  const subtotal = r.recomendado.preco;
+  const total = Math.max(0, subtotal - desconto);
+  const precoUnitFinal = p.quantidade>0 ? total/p.quantidade : 0;
+  const producaoLote = r.producaoLote;
   area.innerHTML = `
     <div class="pdf-doc">
       <div class="pdf-head">
@@ -1056,19 +1278,25 @@ function gerarPdfPedido(p){
       </div>
       <div class="pdf-meta">
         <div><strong>Data:</strong> ${dataFmt}</div>
+        ${validadeFmt ? `<div><strong>Válido até:</strong> ${validadeFmt}</div>` : ''}
         ${p.cliente ? `<div><strong>Cliente:</strong> ${p.cliente}</div>` : ''}
       </div>
       <div class="pdf-item">
         <div class="pdf-item-nome">${p.produto || 'Peça sob encomenda'}</div>
         <div class="pdf-item-linha"><span>Quantidade</span><span>${p.quantidade}</span></div>
         <div class="pdf-item-linha"><span>Cores / materiais</span><span>${materiais.length ? materiais.join(', ') : '—'}</span></div>
+        ${producaoLote && producaoLote.usaLote ? `<div class="pdf-item-linha"><span>Produção</span><span>${producaoLote.fornadas.length} fornada${producaoLote.fornadas.length===1?'':'s'}${producaoLote.fornadas.some(f=>f.tipo==='parcial')?' (parcial na última)':''}</span></div>` : ''}
+        <div class="pdf-item-linha"><span>Valor unitário</span><span>${fmtR(precoUnitFinal)}</span></div>
+        <div class="pdf-item-linha"><span>Subtotal</span><span>${fmtR(subtotal)}</span></div>
+        ${desconto>0 ? `<div class="pdf-item-linha"><span>Desconto</span><span>-${fmtR(desconto)}</span></div>` : ''}
       </div>
       <div class="pdf-valor">
         <div class="pdf-valor-k">VALOR TOTAL</div>
-        <div class="pdf-valor-v">${fmtR(r.recomendado.preco)}</div>
-        ${p.quantidade>1 ? `<div class="pdf-valor-unit">${fmtR(r.precoUnitario)} / peça</div>` : ''}
+        <div class="pdf-valor-v">${fmtR(total)}</div>
+        ${p.quantidade>1 ? `<div class="pdf-valor-unit">${fmtR(precoUnitFinal)} / peça</div>` : ''}
       </div>
-      <div class="pdf-foot">Orçamento gerado por 028Labs — sujeito a confirmação de prazo e disponibilidade de material.</div>
+      ${p.observacoes ? `<div class="pdf-item" style="margin-bottom:20px;"><div style="font-weight:700; font-size:13px; margin-bottom:6px;">Observações</div><div style="font-size:13px; color:#5a564e; white-space:pre-wrap;">${p.observacoes}</div></div>` : ''}
+      <div class="pdf-foot">Orçamento gerado por 028Labs — sujeito a confirmação de prazo e disponibilidade de material. Validade de 7 dias a partir da emissão.</div>
     </div>`;
   window.print();
 }
@@ -1112,6 +1340,15 @@ function renderNav(){
 }
 function fieldNum(key, val, label, step='0.01'){
   return `<div class="field"><label>${label}</label><input type="number" min="0" step="${step}" data-cfg="${key}" value="${val}"></div>`;
+}
+// Formata horas decimais como "Xh Ymin" pra exibição (só leitura — os campos editáveis usam DHM).
+function fmtHoras(decimalHoras){
+  const { dias, horas, minutos } = decompDHM(decimalHoras);
+  const partes = [];
+  if (dias>0) partes.push(`${dias}d`);
+  if (horas>0 || dias>0) partes.push(`${horas}h`);
+  partes.push(`${String(minutos).padStart(2,'0')}min`);
+  return partes.join(' ');
 }
 // Campos de tempo do pedido são editados em dias/horas/minutos, mas continuam guardados
 // e usados internamente como horas decimais — o motor de cálculo não muda em nada.
@@ -1279,8 +1516,10 @@ function emptyPedido(){
     quantidade:0, materialId:'', peso:0, materiaisItens:[], impressoraId: state.impressoras[0]?.id||'',
     tempoImpressao:0, canalVendaId: state.canais[0]?.id||'',
     maoObraValor: state.config.maoObraPadrao||0,
+    descontoComercial: 0, observacoes: '',
     extrasItens:[],
     usaLote:false, capacidadeFornada:0, tempoFornadaParcial:0, pesoFornadaParcialOverride:0,
+    completarFornada:false, modoProducao:'sobDemanda',
     status:'Orçamento' };
 }
 function nextNumero(){ return (state.pedidos.reduce((mx,p)=>Math.max(mx,p.numero||0),0) || 0) + 1; }
@@ -1300,15 +1539,26 @@ function viewNovoPedido(){
   const precoInvalido = !r.percentuaisValidos;
   const warnings = pedidoWarnings(draft);
   const canalPadraoId = state.canais[0]?.id||'';
-  const detalhesPedidoAberto = !!draft.cliente || draft.status!=='Orçamento' || (draft.canalVendaId && draft.canalVendaId!==canalPadraoId);
+  const detalhesPedidoAberto = !!draft.cliente || draft.status!=='Orçamento' || (draft.canalVendaId && draft.canalVendaId!==canalPadraoId) || draft.descontoComercial>0 || !!draft.observacoes;
   const extrasAberto = draft.extrasItens.length > 0;
 
+  const passos = [
+    { label:'① Cliente', feito: !!draft.cliente },
+    { label:'② Produto', feito: !!draft.produto },
+    { label:'③ Produção', feito: draft.materiaisItens.length>0 && draft.tempoImpressao>0 },
+    { label:'④ Adicionais', feito: draft.extrasItens.length>0 },
+    { label:'⑤ Preço', feito: !precoInvalido && r.custoTotal>0 },
+    { label:'⑥ Revisão', feito: false },
+  ];
+  const stepperHtml = `<div class="passos-flow">${passos.map(p=>`<span class="passo-badge ${p.feito?'feito':''}">${p.label}</span>`).join('')}</div>`;
+
   return `<h1>${editingPedidoId?'Editar':'Novo'} orçamento</h1><p class="lead">Preencha os dados da peça — o custo e o preço são calculados na hora.</p>
+    ${stepperHtml}
     ${noRes ? `<div class="tag-note">Cadastre ao menos 1 material e 1 impressora antes de gerar um orçamento.</div>` : ''}
     ${formErrors.length ? `<div class="tag-note err">${formErrors.map(e=>'⚠️ '+e).join('<br>')}</div>` : ''}
     ${(!formErrors.length && warnings.length) ? `<div class="tag-note">${warnings.map(w=>'⚠️ '+w).join('<br>')}</div>` : ''}
     <div class="two-col"><div class="form-col">
-        <div class="card"><h2>Dados do pedido</h2><div class="grid">
+        <div class="card"><div class="area-eyebrow">PEDIDO</div><h2 style="margin-top:2px;">Dados do pedido</h2><div class="grid">
             <div class="field locked"><label>Nº orçamento <span class="lock-tag">auto</span></label><input value="${draft.numero}" disabled></div>
             <div class="field"><label>Produto/Peça</label><input data-p="produto" value="${draft.produto}"></div>
             <div class="field"><label>Quantidade</label><input type="number" min="0" step="1" data-p="quantidade" value="${draft.quantidade}"></div>
@@ -1321,12 +1571,14 @@ function viewNovoPedido(){
                 <div class="field"><label>Data</label><input type="date" data-p="data" value="${draft.data}"></div>
                 <div class="field"><label>Status</label><select data-p="status">${STATUS.map(s=>`<option ${s===draft.status?'selected':''}>${s}</option>`).join('')}</select></div>
                 <div class="field"><label>Canal de venda</label>${state.canais.length ? `<select data-p="canalVendaId">${canalOpts}</select>` : `<input value="Nenhum canal cadastrado" disabled>`}</div>
+                <div class="field"><label>Desconto comercial (R$)</label><input type="number" min="0" step="0.01" data-p="descontoComercial" value="${draft.descontoComercial}"></div>
               </div>
-              <p class="card-note" style="margin-top:10px;">${state.canais.length ? `Comissão aplicada neste orçamento: <strong>${fmtP(canalAtual?.comissao||0)}</strong> (${canalAtual?.nome||'nenhum canal'}). Cadastre ou ajuste canais em "Canais de Venda" no menu.` : 'Nenhum canal cadastrado ainda — vá em "Canais de Venda" no menu pra criar (ex.: Física, Shopee, Mercado Livre).'}</p>
+              <div class="field" style="margin-top:10px;"><label>Observações / condições (aparece no PDF)</label><textarea data-p="observacoes" rows="2" style="width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:6px; font-family:var(--sans); font-size:13.5px; background:var(--input-bg); color:var(--ink);" placeholder="ex: pagamento 50% na aprovação, prazo de 7 dias úteis...">${draft.observacoes}</textarea></div>
+              <p class="card-note" style="margin-top:10px;">${state.canais.length ? `Comissão aplicada neste orçamento: <strong>${fmtP(canalAtual?.comissao||0)}</strong> (${canalAtual?.nome||'nenhum canal'}). Cadastre ou ajuste canais em "Canais de Venda" no menu.` : 'Nenhum canal cadastrado ainda — vá em "Canais de Venda" no menu pra criar (ex.: Física, Shopee, Mercado Livre).'}${draft.descontoComercial>0 ? ` O desconto comercial só aparece no PDF (subtotal/desconto/total) — não altera os cálculos internos de custo/margem.` : ''}</p>
             </div>
           </details>
         </div>
-        <div class="card"><h2>Material e impressão</h2>
+        <div class="card"><div class="area-eyebrow">PRODUÇÃO</div><h2 style="margin-top:2px;">Material e impressão</h2>
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:14px;">
             <input type="checkbox" data-p-bool="usaLote" ${draft.usaLote?'checked':''} style="width:auto;">
             Produzo isso em fornadas/lotes (mais peças que cabem juntas numa impressão)
@@ -1337,20 +1589,73 @@ function viewNovoPedido(){
             ${fieldDHM("tempoImpressao", draft.usaLote ? "Tempo de UMA fornada cheia" : "Tempo de impressão (do lote inteiro)")}
             <div class="field"><label>Mão de obra (R$)</label><input type="number" min="0" step="0.01" data-p="maoObraValor" value="${draft.maoObraValor}"></div>
           </div>
-          ${draft.usaLote && draft.capacidadeFornada>0 ? `
-          <p class="card-note" style="margin-top:10px; font-weight:600; color:var(--ink);">${r.producaoLote.numFornadasCheias>0 ? `${r.producaoLote.numFornadasCheias} fornada${r.producaoLote.numFornadasCheias===1?'':'s'} cheia${r.producaoLote.numFornadasCheias===1?'':'s'} de ${r.producaoLote.capacidade} peças` : ''}${r.producaoLote.numFornadasCheias>0 && r.producaoLote.restante>0 ? ' + ' : ''}${r.producaoLote.restante>0 ? `1 fornada de ${r.producaoLote.restante} peça${r.producaoLote.restante===1?'':'s'}` : ''}${r.producaoLote.numFornadasCheias===0 && r.producaoLote.restante===0 ? 'Informe a quantidade e a capacidade da fornada acima.' : ''}</p>
-          ${r.producaoLote.restante>0 ? `
-          <div class="grid" style="margin-top:10px;">
-            <div class="field"><label>Peso real da fornada menor (g) <span class="lock-tag">opcional</span></label><input type="number" min="0" step="1" data-p="pesoFornadaParcialOverride" value="${draft.pesoFornadaParcialOverride}"></div>
-            <div class="field"><label>Tempo real da fornada menor (h) <span class="lock-tag">opcional</span></label><input type="number" min="0" step="0.01" data-p="tempoFornadaParcial" value="${draft.tempoFornadaParcial}"></div>
+          ${draft.usaLote ? `
+          <div class="field" style="max-width:420px; margin-top:12px;">
+            <label>Modo de produção</label>
+            <select data-p="modoProducao">
+              <option value="sobDemanda" ${draft.modoProducao!=='compartilhado'?'selected':''}>Sob demanda — produzido especificamente pra este pedido</option>
+              <option value="compartilhado" ${draft.modoProducao==='compartilhado'?'selected':''}>Compartilhada/rateio — fatia de uma fornada já feita pra outros fins</option>
+            </select>
           </div>
-          <p class="card-note" style="margin-top:6px;">A fornada de ${r.producaoLote.restante} peça${r.producaoLote.restante===1?'':'s'} não escala necessariamente na mesma proporção da fornada cheia (purga, brim, aquecimento etc.). Se você já fatiou ela separadamente no Bambu Studio, informe o peso/tempo reais aqui. Deixe em 0 pra estimar proporcionalmente a partir da fornada cheia.</p>
           ` : ''}
-          ` : `
+          ${draft.usaLote && draft.modoProducao==='compartilhado' ? `
+          <div class="fornadas-lista">
+            <div class="fornada-card fornada-parcial">
+              <div class="fornada-card-head">
+                <span>${r.producaoLote.fornadasCompletas>0 ? 'Rateio de múltiplas fornadas' : 'Rateio de fornada existente'}</span>
+                <span>Pedido: ${draft.quantidade} peça${draft.quantidade===1?'':'s'}</span>
+              </div>
+              <div class="fornada-card-body">
+                ${r.producaoLote.fornadasCompletas>0 ? `
+                  ${r.producaoLote.fornadasCompletas} fornada${r.producaoLote.fornadasCompletas===1?'':'s'} completa${r.producaoLote.fornadasCompletas===1?'':'s'}
+                  ${r.producaoLote.pecasResiduais>0 ? ` + ${r.producaoLote.pecasResiduais} peça${r.producaoLote.pecasResiduais===1?'':'s'} de uma fornada adicional` : ' (rateio exato, sem resto)'}
+                  <br>
+                ` : `${draft.quantidade} de ${draft.capacidadeFornada} peça${draft.capacidadeFornada===1?'':'s'}<br>`}
+                Participação total: <span class="badge-confirmado">${fmtP(r.producaoLote.participacaoTotal||0)}</span> de uma fornada ·
+                material rateado: ${r.pesoTotal.toFixed(0)}g · tempo rateado: ${fmtHoras(r.tempoImpressaoTotal)}
+              </div>
+            </div>
+          </div>
+          <p class="card-note" style="margin-top:8px;">Esse pedido não gera fornada nova — ele toma uma fatia proporcional da fornada cheia (peso/tempo informados acima) que já existe ou já será produzida por outro motivo${r.producaoLote.fornadasCompletas>0 ? `, podendo abranger mais de uma fornada inteira quando o pedido é maior que a capacidade` : ''}. O custo é rateado (material, energia, máquina, indiretos); a quantidade comercial continua sendo <strong>${draft.quantidade}</strong>, mesmo que a fornada de referência tenha ${draft.capacidadeFornada}.</p>
+          ` : ''}
+          ${draft.usaLote && draft.modoProducao!=='compartilhado' && draft.capacidadeFornada>0 ? `
+          <div class="fornadas-lista">
+            ${r.producaoLote.fornadas.map(f => `
+              <div class="fornada-card ${f.tipo==='parcial'?'fornada-parcial':''}">
+                <div class="fornada-card-head">
+                  <span>Fornada ${f.numero}${f.tipo==='parcial'?' — PARCIAL':(f.completada?' — COMPLETADA':'')}</span>
+                  <span>${f.unidades} peça${f.unidades===1?'':'s'}</span>
+                </div>
+                ${f.tipo==='parcial' ? `
+                <div class="grid" style="margin-top:8px;">
+                  <div class="field"><label>Peso (g) <span class="${f.estimado?'badge-estimativa':'badge-confirmado'}">${f.estimado?'estimativa':'confirmado'}</span></label><input type="number" min="0" step="1" data-p="pesoFornadaParcialOverride" value="${draft.pesoFornadaParcialOverride||''}" placeholder="${f.peso.toFixed(0)} (estimado)"></div>
+                  ${fieldDHM("tempoFornadaParcial", `Tempo <span class="${f.estimado?'badge-estimativa':'badge-confirmado'}">${f.estimado?'estimativa':'confirmado'}</span>`)}
+                </div>
+                ${!draft.tempoFornadaParcial ? `<p class="card-note" style="margin-top:4px;">Estimativa proporcional: ${fmtHoras(f.tempo)}. Preencha os campos acima com os valores reais do fatiador quando fatiar essa fornada menor, se quiser mais precisão.</p>` : ''}
+                ` : `<div class="fornada-card-body">${f.peso.toFixed(0)}g · ${fmtHoras(f.tempo)}</div>`}
+              </div>`).join('')}
+          </div>
+          ${r.producaoLote.restante>0 && !r.producaoLote.completar ? `
+          <div class="tag-note" style="margin-top:10px;">
+            A última fornada está incompleta (${r.producaoLote.restante} de ${r.producaoLote.capacidade} peças). Você pode produzir só o necessário ou completar a fornada e guardar o excedente em estoque.
+            <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
+              <button type="button" class="btn ghost small" data-completar-fornada="0">Produzir só ${r.producaoLote.restante}</button>
+              <button type="button" class="btn small" data-completar-fornada="1">Completar para ${r.producaoLote.capacidade}</button>
+            </div>
+          </div>` : ''}
+          ${r.producaoLote.completar ? `
+          <div class="tag-note info" style="margin-top:10px;">
+            Completando a fornada: produção real de <strong>${r.producaoLote.producaoTotal} peças</strong>, mas o orçamento continua cobrando só as <strong>${draft.quantidade} pedidas</strong>. As outras ${r.producaoLote.excedente} ficam registradas como excedente/estoque.
+            <button type="button" class="btn ghost small" style="margin-left:8px;" data-completar-fornada="0">Desfazer</button>
+          </div>` : ''}
+          ${r.producaoLote.fornadas.length===0 ? `<p class="card-note" style="margin-top:10px;">Informe a quantidade e a capacidade da fornada acima.</p>` : ''}
+          <p class="card-note" style="margin-top:8px;">Peso/tempo digitados acima são de <strong>UMA fornada cheia</strong> (${draft.capacidadeFornada||'N'} peças) — a fornada parcial não escala necessariamente na mesma proporção (purga, brim, aquecimento); confirme com os valores reais do fatiador quando puder.</p>
+          ` : ''}
+          ${!draft.usaLote ? `
           <p class="card-note" style="margin-top:10px;">${draft.quantidade>1
             ? `Como a quantidade acima é <strong>${draft.quantidade}</strong>, esse tempo é o do <strong>lote inteiro</strong> — se você fatiar as ${draft.quantidade} peças juntas no Bambu Studio, use o tempo total que ele mostra pra chapa toda, sem dividir. A divisão por peça é automática, lá embaixo em "Preço unitário".`
             : `Tempo total que a impressora leva pra produzir esse pedido. Mão de obra é um valor fixo que você define pra esse pedido, sem precisar detalhar tarefa por tarefa.`}</p>
-          `}
+          ` : ''}
 
           <h2 style="margin-top:20px; font-size:14px;">Filamentos usados</h2>
           <p class="card-note">Adicione cada filamento e o peso ${draft.usaLote ? `<strong>de UMA fornada cheia</strong> (o peso da chapa inteira com ${draft.capacidadeFornada||'N'} peças, do jeito que o Bambu Studio mostra)` : draft.quantidade>1 ? `<strong>total gasto pra produzir as ${draft.quantidade} peças deste pedido</strong> (o peso da chapa inteira que o Bambu Studio mostra, não de uma peça isolada)` : 'usado nesse pedido'} — se a peça usa mais de uma cor ou material, adicione quantos precisar.</p>
@@ -1390,23 +1695,44 @@ function viewNovoPedido(){
           </tbody></table>` : ''}
           </div>
         </details>
-        <div style="display:flex; gap:10px;">
-          <button class="btn" id="save-pedido">${editingPedidoId?'Salvar alterações':'Salvar orçamento'}</button>
-          <button class="btn ghost" id="cancel-pedido">Cancelar</button>
-          <button class="btn ghost" id="gerar-pdf">Gerar PDF do orçamento</button>
-        </div></div>
+        </div>
       <div class="result-col"><div class="card result-panel"><h2>Resultado <span class="lock-tag">calculado</span></h2>
-          ${precoInvalido ? `<div class="tag-note err">⚠️ Impostos + comissão + margem somam 100% ou mais em Configurações — nenhum preço pode ser calculado.</div>` : `
+          ${precoInvalido ? `<div class="tag-note err">⚠️ Impostos + comissão + margem somam 100% ou mais em Configurações — nenhum preço pode ser calculado.</div>
+          <div style="display:flex; gap:8px; margin-top:12px; flex-wrap:wrap;">
+            <button class="btn ghost" id="cancel-pedido">Cancelar</button>
+          </div>` : `
           ${r.qtd>1 ? `<p class="card-note" style="margin-bottom:12px;">Os custos abaixo (material, energia, máquina etc.) são do <strong>lote inteiro</strong> — a divisão por peça só acontece no preço unitário, em destaque.</p>` : ''}
           ${r.producaoLote && r.producaoLote.usaLote ? `<div class="breakdown" style="margin-bottom:14px;">
-            <div class="line" style="font-weight:700;"><span>PRODUÇÃO</span><span></span></div>
-            ${r.producaoLote.numFornadasCheias>0 ? `<div class="line"><span>Fornadas cheias</span><span>${r.producaoLote.numFornadasCheias} × ${r.producaoLote.capacidade} peças</span></div>` : ''}
-            ${r.producaoLote.restante>0 ? `<div class="line"><span>Fornada menor</span><span>${r.producaoLote.restante} peça${r.producaoLote.restante===1?'':'s'}</span></div>` : ''}
+            <div class="line" style="font-weight:700;"><span>PRODUÇÃO</span><span>${draft.modoProducao==='compartilhado'?'compartilhada/rateio':'sob demanda'}</span></div>
+            <div class="line"><span>Pedido (comercial)</span><span>${draft.quantidade} peça${draft.quantidade===1?'':'s'}</span></div>
+            ${draft.modoProducao==='compartilhado' ? `
+            <div class="line"><span>Participação total</span><span>${fmtP(r.producaoLote.participacaoTotal||0)}</span></div>
+            ${r.producaoLote.fornadasCompletas>0 ? `<div class="line"><span>Fornadas completas rateadas</span><span>${r.producaoLote.fornadasCompletas}</span></div>` : ''}
+            ${r.producaoLote.pecasResiduais>0 ? `<div class="line"><span>+ Peças de fornada adicional</span><span>${r.producaoLote.pecasResiduais}</span></div>` : ''}
+            ` : `
+            <div class="line"><span>Fornadas</span><span>${r.producaoLote.fornadas.length}</span></div>
+            <div class="line"><span>Produção real</span><span>${r.producaoLote.producaoTotal} peça${r.producaoLote.producaoTotal===1?'':'s'}</span></div>
+            ${r.producaoLote.excedente>0 ? `<div class="line" style="color:var(--accent-dark); font-weight:700;"><span>Excedente/estoque</span><span>${r.producaoLote.excedente} peça${r.producaoLote.excedente===1?'':'s'}</span></div>` : ''}
+            `}
+            <div class="line"><span>Material total</span><span>${r.pesoTotal.toFixed(0)}g</span></div>
+            <div class="line"><span>Tempo total</span><span>${fmtHoras(r.tempoImpressaoTotal)}</span></div>
           </div>` : ''}
           <div class="result-strip">
             <div class="result-cell hero"><div class="k">PREÇO UNITÁRIO — o que cobrar por peça</div><div class="v">${fmtR(r.precoUnitario)} <span style="font-size:13px; font-weight:400;">/ peça</span></div></div>
             <div class="result-cell"><div class="k">TOTAL DO PEDIDO (${r.qtd} peça${r.qtd===1?'':'s'})</div><div class="v">${fmtR(r.recomendado.preco)}</div></div>
           </div>
+          <div class="breakdown" style="margin-top:10px;">
+            <div class="line"><span>Preço mínimo — sem margem</span><span>${fmtR(r.precoMinimo)}</span></div>
+            <div class="line"><span>Margem líquida</span><span>${fmtP(r.recomendado.margemReal)}</span></div>
+          </div>
+          <div style="display:flex; gap:8px; margin-top:16px; flex-wrap:wrap;">
+            <button class="btn" id="save-pedido">${editingPedidoId?'Salvar alterações':'Salvar orçamento'}</button>
+            <button class="btn ghost" id="gerar-pdf">Gerar PDF</button>
+            <button class="btn ghost" id="cancel-pedido">Cancelar</button>
+          </div>
+          <details class="subdetails" style="margin-top:16px;">
+            <summary>Ver composição do preço</summary>
+            <div>
           <div class="breakdown">
             <div class="line"><span>Material</span><span>${fmtR(r.custoMaterial)}</span></div>
             <div class="line"><span>Perdas de material</span><span>${fmtR(r.perdaMaterial)}</span></div>
@@ -1435,21 +1761,67 @@ function viewNovoPedido(){
             <div class="line"><span>Margem atacado</span><span>${fmtP(r.atacado.margemReal)}</span></div>
             ${alertaAbaixoMinimo(r.atacado)}
           </div>
+            </div>
+          </details>
           `}
         </div></div></div>`;
 }
+let histBusca = '';
+let histStatusFiltro = '';
+let histOrdenacao = 'recentes';
+function duplicarPedido(id){
+  const original = state.pedidos.find(p=>p.id===id);
+  if (!original) return;
+  const copia = JSON.parse(JSON.stringify(original));
+  copia.id = uid();
+  copia.numero = nextNumero();
+  copia.status = 'Orçamento';
+  copia.data = new Date().toISOString().slice(0,10);
+  // Regenera os lineId dos itens da cópia, pra cada orçamento ter suas próprias referências internas.
+  (copia.materiaisItens||[]).forEach(it=>{ it.lineId = uid(); });
+  (copia.extrasItens||[]).forEach(it=>{ it.lineId = uid(); });
+  state.pedidos.push(copia);
+  queueSync();
+  editingPedidoId = copia.id; draft = null; formErrors = []; tab = 'novo';
+  render();
+}
 function viewListaPedidos(){
-  const rows = [...state.pedidos].sort((a,b)=>b.numero-a.numero).map(p=>{ const r = calcPedido(p);
+  let lista = [...state.pedidos];
+  if (histBusca.trim()){
+    const q = histBusca.trim().toLowerCase();
+    lista = lista.filter(p => (p.cliente||'').toLowerCase().includes(q) || (p.produto||'').toLowerCase().includes(q) || String(p.numero).includes(q));
+  }
+  if (histStatusFiltro){
+    lista = lista.filter(p => p.status === histStatusFiltro);
+  }
+  lista.sort((a,b) => {
+    if (histOrdenacao==='antigos') return (a.data||'').localeCompare(b.data||'') || a.numero-b.numero;
+    if (histOrdenacao==='numero-desc') return b.numero-a.numero;
+    if (histOrdenacao==='numero-asc') return a.numero-b.numero;
+    return (b.data||'').localeCompare(a.data||'') || b.numero-a.numero; // recentes (padrão)
+  });
+  const rows = lista.map(p=>{ const r = calcPedido(p);
     return `<tr><td class="mono">#${p.numero}</td><td>${p.data}</td><td>${p.cliente}</td><td>${p.produto}</td>
       <td class="num">${p.quantidade}</td><td class="num mono">${fmtR(r.custoTotal)}</td>
       <td class="num mono">${fmtR(r.recomendado.preco)}</td><td class="num mono" style="color:var(--ok)">${fmtR(r.recomendado.lucro)}</td>
       <td><span class="badge ${statusClass[p.status]||''}">${p.status}</span></td>
       <td class="row-actions"><button class="btn ghost small" data-edit-pedido="${p.id}">Editar</button>
+        <button class="btn ghost small" data-dup-pedido="${p.id}">Duplicar</button>
         <button class="btn ghost small" data-pdf-pedido="${p.id}">PDF</button>
         <button class="btn danger small" data-del-pedido="${p.id}">Excluir</button></td></tr>`; }).join('');
   return `<h1>Orçamentos</h1><p class="lead">Todos os pedidos salvos, com custo e preço já calculados.</p>
-    <div class="card"><table><thead><tr><th>Nº</th><th>Data</th><th>Cliente</th><th>Produto</th><th>Qtd</th><th>Custo</th><th>Preço</th><th>Lucro</th><th>Status</th><th></th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="10"><div class="empty">Nenhum orçamento salvo ainda. Vá em "Novo orçamento".</div></td></tr>`}</tbody></table></div>`;
+    <div class="card"><div class="grid">
+        <div class="field"><label>Buscar (cliente, produto ou nº)</label><input id="hist-busca" value="${histBusca}" placeholder="ex: Bruno, chaveiro, 12..."></div>
+        <div class="field"><label>Status</label><select id="hist-status"><option value="">Todos</option>${STATUS.map(s=>`<option value="${s}" ${histStatusFiltro===s?'selected':''}>${s}</option>`).join('')}</select></div>
+        <div class="field"><label>Ordenar por</label><select id="hist-ordenacao">
+          <option value="recentes" ${histOrdenacao==='recentes'?'selected':''}>Mais recentes primeiro</option>
+          <option value="antigos" ${histOrdenacao==='antigos'?'selected':''}>Mais antigos primeiro</option>
+          <option value="numero-desc" ${histOrdenacao==='numero-desc'?'selected':''}>Nº — maior primeiro</option>
+          <option value="numero-asc" ${histOrdenacao==='numero-asc'?'selected':''}>Nº — menor primeiro</option>
+        </select></div>
+      </div></div>
+    <div class="card" style="overflow-x:auto;"><table><thead><tr><th>Nº</th><th>Data</th><th>Cliente</th><th>Produto</th><th>Qtd</th><th>Custo</th><th>Preço</th><th>Lucro</th><th>Status</th><th></th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="10"><div class="empty">${state.pedidos.length ? 'Nenhum orçamento bate com a busca/filtro.' : 'Nenhum orçamento salvo ainda. Vá em "Novo orçamento".'}</div></td></tr>`}</tbody></table></div>`;
 }
 function viewTestes(){
   const results = runSelfTests();
@@ -1571,6 +1943,8 @@ function bindEvents(){
   };
   document.querySelectorAll('[data-del-mat]').forEach(el=>{
     el.onclick = ()=>{
+      const m = state.materiais.find(x=>x.id===el.dataset.delMat);
+      if (!confirm(`Remover o filamento "${m?m.nome:''}"? Essa ação não pode ser desfeita.`)) return;
       state.materiais = state.materiais.filter(m=>m.id!==el.dataset.delMat);
       if (compraSelecionada === el.dataset.delMat){ compraSelecionada=''; compraDraft=null; }
       queueSync(); render();
@@ -1583,7 +1957,11 @@ function bindEvents(){
       i[k] = (k==='nome'||k==='modelo') ? el.value : Math.max(0,parseFloat(el.value)||0); queueSync(); render(); };
   });
   document.querySelectorAll('[data-del-imp]').forEach(el=>{
-    el.onclick = ()=>{ state.impressoras = state.impressoras.filter(i=>i.id!==el.dataset.delImp); queueSync(); render(); };
+    el.onclick = ()=>{
+      const i = state.impressoras.find(x=>x.id===el.dataset.delImp);
+      if (!confirm(`Remover a impressora "${i?i.nome:''}"? Essa ação não pode ser desfeita.`)) return;
+      state.impressoras = state.impressoras.filter(i=>i.id!==el.dataset.delImp); queueSync(); render();
+    };
   });
   const addExt = document.getElementById('add-ext');
   if (addExt) addExt.onclick = ()=>{ state.extras.push({ id:uid(), nome:'Novo item', valor:0, tipoCobranca:'unidade' }); queueSync(); render(); };
@@ -1592,7 +1970,11 @@ function bindEvents(){
       e[k] = (k==='valor') ? Math.max(0,parseFloat(el.value)||0) : el.value; queueSync(); render(); };
   });
   document.querySelectorAll('[data-del-ext]').forEach(el=>{
-    el.onclick = ()=>{ state.extras = state.extras.filter(e=>e.id!==el.dataset.delExt); queueSync(); render(); };
+    el.onclick = ()=>{
+      const e = state.extras.find(x=>x.id===el.dataset.delExt);
+      if (!confirm(`Remover "${e?e.nome:''}" de Embalagens/Adicionais? Essa ação não pode ser desfeita.`)) return;
+      state.extras = state.extras.filter(e=>e.id!==el.dataset.delExt); queueSync(); render();
+    };
   });
   const addCanal = document.getElementById('add-canal');
   if (addCanal) addCanal.onclick = ()=>{ state.canais.push({ id:uid(), nome:'Novo canal', comissao:0 }); queueSync(); render(); };
@@ -1601,7 +1983,11 @@ function bindEvents(){
       ch[k] = (k==='comissao') ? Math.max(0,parseFloat(el.value)||0) : el.value; queueSync(); render(); };
   });
   document.querySelectorAll('[data-del-cancat]').forEach(el=>{
-    el.onclick = ()=>{ state.canais = state.canais.filter(ch=>ch.id!==el.dataset.delCancat); queueSync(); render(); };
+    el.onclick = ()=>{
+      const ch = state.canais.find(x=>x.id===el.dataset.delCancat);
+      if (!confirm(`Remover o canal "${ch?ch.nome:''}"? Essa ação não pode ser desfeita.`)) return;
+      state.canais = state.canais.filter(ch=>ch.id!==el.dataset.delCancat); queueSync(); render();
+    };
   });
   document.querySelectorAll('[data-dhm]').forEach(el=>{
     el.onchange = ()=>{
@@ -1617,12 +2003,15 @@ function bindEvents(){
   });
   document.querySelectorAll('[data-p]').forEach(el=>{
     el.onchange = ()=>{ const k = el.dataset.p;
-      const textKeys = ['data','cliente','produto','status','materialId','impressoraId','canalVendaId'];
+      const textKeys = ['data','cliente','produto','status','materialId','impressoraId','canalVendaId','modoProducao','observacoes'];
       draft[k] = textKeys.includes(k) ? el.value : Math.max(0, parseFloat(el.value)||0);
       render(); };
   });
   document.querySelectorAll('[data-p-bool]').forEach(el=>{
     el.onchange = ()=>{ draft[el.dataset.pBool] = el.checked; render(); };
+  });
+  document.querySelectorAll('[data-completar-fornada]').forEach(el=>{
+    el.onclick = ()=>{ draft.completarFornada = el.dataset.completarFornada==='1'; render(); };
   });
   const addMatItem = document.getElementById('add-matitem');
   if (addMatItem) addMatItem.onclick = ()=>{
@@ -1667,11 +2056,24 @@ function bindEvents(){
   document.querySelectorAll('[data-pdf-pedido]').forEach(el=>{
     el.onclick = ()=>{ const p = state.pedidos.find(x=>x.id===el.dataset.pdfPedido); if (p) gerarPdfPedido(p); };
   });
+  document.querySelectorAll('[data-dup-pedido]').forEach(el=>{
+    el.onclick = ()=>{ duplicarPedido(el.dataset.dupPedido); };
+  });
+  const histBuscaEl = document.getElementById('hist-busca');
+  if (histBuscaEl) histBuscaEl.onchange = ()=>{ histBusca = histBuscaEl.value; render(); };
+  const histStatusEl = document.getElementById('hist-status');
+  if (histStatusEl) histStatusEl.onchange = ()=>{ histStatusFiltro = histStatusEl.value; render(); };
+  const histOrdenacaoEl = document.getElementById('hist-ordenacao');
+  if (histOrdenacaoEl) histOrdenacaoEl.onchange = ()=>{ histOrdenacao = histOrdenacaoEl.value; render(); };
   document.querySelectorAll('[data-edit-pedido]').forEach(el=>{
     el.onclick = ()=>{ editingPedidoId = el.dataset.editPedido; draft = null; formErrors=[]; tab='novo'; render(); };
   });
   document.querySelectorAll('[data-del-pedido]').forEach(el=>{
-    el.onclick = ()=>{ state.pedidos = state.pedidos.filter(p=>p.id!==el.dataset.delPedido); queueSync(); render(); };
+    el.onclick = ()=>{
+      const p = state.pedidos.find(x=>x.id===el.dataset.delPedido);
+      if (!confirm(`Excluir o orçamento #${p?p.numero:''}${p&&p.produto?` (${p.produto})`:''}? Essa ação não pode ser desfeita.`)) return;
+      state.pedidos = state.pedidos.filter(p=>p.id!==el.dataset.delPedido); queueSync(); render();
+    };
   });
   const ghSave = document.getElementById('gh-save');
   if (ghSave) ghSave.onclick = async ()=>{
