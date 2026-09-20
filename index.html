@@ -136,6 +136,7 @@
   details.subdetails[open] summary{border-bottom:1px solid var(--line);}
   details.subdetails > div{padding:14px;}
   .add-item-row{display:flex; gap:8px; margin-bottom:14px; align-items:flex-end;}
+  tr.row-selected td{background:var(--accent-soft);}
   .mobile-nav{display:none; position:fixed; left:0; right:0; bottom:0; background:#1c1b19; border-top:1px solid #33312c; z-index:55; padding:6px 4px calc(6px + env(safe-area-inset-bottom,0px));}
   .mnav-btn{all:unset; cursor:pointer; flex:1; display:flex; flex-direction:column; align-items:center; gap:2px; padding:6px 2px; color:#93908a; font-size:10px; border-radius:8px; text-align:center;}
   .mnav-btn .mnav-ic{font-size:17px; line-height:1;}
@@ -1198,21 +1199,22 @@ function viewMateriais(){
   const matOptsCompra = state.materiais.map(m=>`<option value="${m.id}" ${m.id===compraSelecionada?'selected':''}>${opcaoMaterial(m)}</option>`).join('');
   const materialEmFoco = ehNovo ? null : state.materiais.find(m=>m.id===compraSelecionada);
 
-  const rows = state.materiais.map(m => `<tr data-id="${m.id}">
-      <td><input data-mat="nome" value="${m.nome}" style="min-width:120px"></td>
-      <td><input data-mat="marca" value="${m.marca||''}" style="min-width:90px"></td>
-      <td><input data-mat="tipo" value="${m.tipo||''}" style="width:70px"></td>
-      <td><input data-mat="pesoRolo" type="number" min="0" step="1" value="${m.pesoRolo}" style="width:80px" class="num"></td>
-      <td><input data-mat="precoRolo" type="number" min="0" step="0.01" value="${m.precoRolo}" style="width:90px" class="num"></td>
+  const rows = state.materiais.map(m => `<tr data-id="${m.id}" class="${m.id===compraSelecionada?'row-selected':''}">
+      <td>${m.nome}</td>
+      <td>${m.marca||''}</td>
+      <td>${m.tipo||''}</td>
+      <td class="num mono">${m.pesoRolo}</td>
+      <td class="num mono">${fmtR(m.precoRolo)}</td>
       <td class="num mono">${fmtR(precoGrama(m))}</td>
-      <td><input data-mat="fornecedor" value="${m.fornecedor||''}" style="min-width:110px"></td>
-      <td><input data-mat="dataUltimaCompra" type="date" value="${m.dataUltimaCompra||''}" style="width:135px"></td>
+      <td>${m.fornecedor||''}</td>
+      <td>${fmtData(m.dataUltimaCompra)||''}</td>
       <td class="mono" style="text-align:center; cursor:default;" title="${(m.historico||[]).length ? (m.historico||[]).map(h=>`${h.data||'sem data'} · ${h.fornecedor||'sem fornecedor'} · ${fmtR(h.precoRolo||0)}`).join('\n') : 'Sem compras anteriores registradas'}">${(m.historico||[]).length}</td>
-      <td><button class="btn danger small" data-del-mat="${m.id}">Remover</button></td></tr>`).join('');
+      <td class="row-actions"><button class="btn ghost small" data-editar-mat="${m.id}">Editar</button>
+        <button class="btn danger small" data-del-mat="${m.id}">Remover</button></td></tr>`).join('');
 
   return `<h1>Materiais</h1><p class="lead">Cadastre seus filamentos. O custo por grama é calculado sozinho.</p>
-    <div class="card"><h2>Registrar compra de filamento</h2>
-      <p class="card-note">Escolha o filamento que você comprou e lance o preço, fornecedor e data novos — o cadastro é atualizado e o preço anterior fica guardado no histórico. Não achou na lista? Escolha "+ Novo filamento" e cadastre do zero.</p>
+    <div class="card"><h2>${ehNovo ? 'Cadastrar filamento novo' : 'Editando filamento'}</h2>
+      <p class="card-note">${ehNovo ? 'Escolha na lista abaixo pra editar um filamento existente, ou preencha os campos pra cadastrar um novo.' : 'Ajuste o que precisar — nome, marca, peso, preço, fornecedor, data. Mudar o preço ou fornecedor guarda o valor anterior no histórico automaticamente.'}</p>
       <div class="grid">
         <div class="field"><label>Filamento</label><select id="compra-select">
             <option value="__novo__" ${ehNovo?'selected':''}>+ Novo filamento</option>
@@ -1221,15 +1223,18 @@ function viewMateriais(){
       </div>
       ${materialEmFoco ? fichaMaterial(materialEmFoco) : ''}
       <div class="grid" style="margin-top:14px;">
-        <div class="field"><label>Nome ${!ehNovo?'<span class="lock-tag">do cadastro</span>':''}</label><input id="compra-nome" value="${compraDraft.nome}" ${!ehNovo?'disabled':''}></div>
-        <div class="field"><label>Marca ${!ehNovo?'<span class="lock-tag">do cadastro</span>':''}</label><input id="compra-marca" value="${compraDraft.marca}" ${!ehNovo?'disabled':''}></div>
-        <div class="field"><label>Tipo ${!ehNovo?'<span class="lock-tag">do cadastro</span>':''}</label><input id="compra-tipo" value="${compraDraft.tipo}" ${!ehNovo?'disabled':''}></div>
+        <div class="field"><label>Nome</label><input id="compra-nome" value="${compraDraft.nome}"></div>
+        <div class="field"><label>Marca</label><input id="compra-marca" value="${compraDraft.marca}"></div>
+        <div class="field"><label>Tipo</label><input id="compra-tipo" value="${compraDraft.tipo}"></div>
         <div class="field"><label>Peso do rolo (g)</label><input id="compra-peso" type="number" min="0" step="1" value="${compraDraft.pesoRolo}"></div>
         <div class="field"><label>Preço pago agora (R$)</label><input id="compra-preco" type="number" min="0" step="0.01" value="${compraDraft.precoRolo}"></div>
         <div class="field"><label>Fornecedor</label><input id="compra-fornecedor" value="${compraDraft.fornecedor}" placeholder="ex: Voolt3D (site), Shopee..."></div>
         <div class="field"><label>Data da compra</label><input id="compra-data" type="date" value="${compraDraft.data}"></div>
       </div>
-      <div style="margin-top:16px;"><button class="btn" id="registrar-compra">${ehNovo?'Cadastrar filamento':'Registrar compra e atualizar preço'}</button></div>
+      <div style="margin-top:16px; display:flex; gap:10px;">
+        <button class="btn" id="registrar-compra">${ehNovo?'Cadastrar filamento':'Salvar alterações'}</button>
+        ${!ehNovo ? `<button class="btn ghost" id="cancelar-edicao-mat">Cancelar</button>` : ''}
+      </div>
     </div>
     <div class="card"><div class="toolbar"><h2 style="margin:0">Filamentos cadastrados</h2></div>
       <table><thead><tr><th>Material</th><th>Marca</th><th>Tipo</th><th>Peso rolo (g)</th><th>Preço rolo (R$)</th><th>R$/g <span class="lock-tag">calc</span></th><th>Fornecedor</th><th>Última compra</th><th>Histórico</th><th></th></tr></thead>
@@ -1525,6 +1530,15 @@ function bindEvents(){
     compraDraft = compraDraftPadrao(compraSelecionada==='__novo__' ? null : state.materiais.find(m=>m.id===compraSelecionada));
     render();
   };
+  document.querySelectorAll('[data-editar-mat]').forEach(el=>{
+    el.onclick = ()=>{
+      compraSelecionada = el.dataset.editarMat;
+      compraDraft = compraDraftPadrao(state.materiais.find(m=>m.id===compraSelecionada));
+      render();
+    };
+  });
+  const cancelarEdicaoMat = document.getElementById('cancelar-edicao-mat');
+  if (cancelarEdicaoMat) cancelarEdicaoMat.onclick = ()=>{ compraSelecionada=''; compraDraft=null; render(); };
   const registrarCompra = document.getElementById('registrar-compra');
   if (registrarCompra) registrarCompra.onclick = ()=>{
     const nome = document.getElementById('compra-nome').value.trim();
@@ -1541,11 +1555,13 @@ function bindEvents(){
     } else {
       const m = state.materiais.find(x=>x.id===compraSelecionada);
       if (m){
-        // Só entra no histórico se algo realmente mudou desde a última compra registrada.
+        // Só entra no histórico se preço ou fornecedor realmente mudaram desde a última compra —
+        // corrigir nome/marca/tipo não conta como uma nova compra.
         if (m.precoRolo !== precoRolo || (m.fornecedor||'') !== fornecedor){
           m.historico = m.historico || [];
           m.historico.push({ data: m.dataUltimaCompra||'', fornecedor: m.fornecedor||'', precoRolo: m.precoRolo });
         }
+        m.nome = nome || m.nome; m.marca = marca; m.tipo = tipo;
         m.pesoRolo = pesoRolo; m.precoRolo = precoRolo; m.fornecedor = fornecedor; m.dataUltimaCompra = dataCompra;
       }
     }
@@ -1553,19 +1569,12 @@ function bindEvents(){
     compraSelecionada = ''; compraDraft = null;
     render();
   };
-  document.querySelectorAll('[data-mat]').forEach(el=>{
-    el.onchange = ()=>{ const id = el.closest('tr').dataset.id; const m = state.materiais.find(x=>x.id===id); const k = el.dataset.mat;
-      const novoValor = (k==='pesoRolo'||k==='precoRolo') ? Math.max(0,parseFloat(el.value)||0) : el.value;
-      // Editar o preço direto na tabela também conta como uma nova compra — guarda o valor anterior no histórico.
-      if (k==='precoRolo' && novoValor !== m.precoRolo){
-        m.historico = m.historico || [];
-        m.historico.push({ data: m.dataUltimaCompra||'', fornecedor: m.fornecedor||'', precoRolo: m.precoRolo });
-        m.dataUltimaCompra = new Date().toISOString().slice(0,10);
-      }
-      m[k] = novoValor; queueSync(); render(); };
-  });
   document.querySelectorAll('[data-del-mat]').forEach(el=>{
-    el.onclick = ()=>{ state.materiais = state.materiais.filter(m=>m.id!==el.dataset.delMat); queueSync(); render(); };
+    el.onclick = ()=>{
+      state.materiais = state.materiais.filter(m=>m.id!==el.dataset.delMat);
+      if (compraSelecionada === el.dataset.delMat){ compraSelecionada=''; compraDraft=null; }
+      queueSync(); render();
+    };
   });
   const addImp = document.getElementById('add-imp');
   if (addImp) addImp.onclick = ()=>{ state.impressoras.push({ id:uid(), nome:'Nova impressora', modelo:'', valorAquisicao:0, vidaUtil:8000, potencia:120, manutencaoMensal:0, horasMes:150 }); queueSync(); render(); };
